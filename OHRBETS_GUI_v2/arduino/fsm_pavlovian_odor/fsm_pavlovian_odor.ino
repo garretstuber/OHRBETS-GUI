@@ -19,12 +19,12 @@
 
 // Reward delivery pattern
 #define REWARD_PULSE1_DURATION  40    // First reward pulse (ms)
-#define REWARD_DELAY_DURATION   180   // Delay between pulses (ms)
-#define REWARD_PULSE2_DURATION  40    // Second reward pulse (ms)
+#define REWARD_DELAY_DURATION   140   // Delay between pulses (ms) - changed from 180 to 140
+#define REWARD_PULSE2_DURATION  20    // Second reward pulse (ms) - changed from 40 to 20
 
 // Manual test durations
 #define TEST_ODOR_DURATION    1000    // 1 second for manual odor test
-#define TEST_REWARD_DURATION  260     // Combined duration of reward sequence (40+180+40)
+#define TEST_REWARD_DURATION  200     // Combined duration of reward sequence (40+140+20)
 
 // Timing precision: use microseconds for all timestamps
 // State machine: use non-blocking design with millis() for state transitions
@@ -44,7 +44,9 @@ private:
         // Test states
         TEST_ODOR1,
         TEST_ODOR2,
-        TEST_REWARD
+        TEST_REWARD1,
+        TEST_REWARD_DELAY,
+        TEST_REWARD2
     };
     
     State state = IDLE;
@@ -69,6 +71,9 @@ private:
     // Odor state tracking
     bool odor1Active = false;
     bool odor2Active = false;
+    
+    // Reward state tracking
+    bool rewardActive = false;
     
     // Lick sensor tracking
     unsigned long lastLickTime = 0;
@@ -100,8 +105,16 @@ private:
     }
     
     void setReward(bool state) {
+        // Directly control the reward pin
         digitalWrite(REWARD_PIN, state ? HIGH : LOW);
+        rewardActive = state;
+        
+        // Log the event
         logEvent(state ? EVENT_REWARD_ON : EVENT_REWARD_OFF);
+        
+        // Debug output
+        Serial.print("REWARD_");
+        Serial.println(state ? "ON" : "OFF");
     }
     
     void logEvent(int eventCode) {
@@ -136,11 +149,13 @@ private:
         digitalWrite(REWARD_PIN, LOW);
         odor1Active = false;
         odor2Active = false;
+        rewardActive = false;
     }
     
     // Test reward with 2-pulse pattern
     void startTestReward() {
-        state = TEST_REWARD;
+        // First pulse
+        state = TEST_REWARD1;
         stateStartTime = millis();
         nextStateTime = stateStartTime + REWARD_PULSE1_DURATION;
         setReward(true);
@@ -165,6 +180,7 @@ public:
         // Initialize state variables
         odor1Active = false;
         odor2Active = false;
+        rewardActive = false;
         
         // Initialize serial
         Serial.begin(115200);
@@ -269,33 +285,30 @@ public:
                     state = IDLE;
                     Serial.println("TEST_ODOR2_COMPLETE");
                     break;
+                
+                // New test states for reward with explicit state transitions
+                case TEST_REWARD1:
+                    // End of first pulse - turn off solenoid
+                    setReward(false);
+                    // Transition to delay
+                    state = TEST_REWARD_DELAY;
+                    stateStartTime = currentTime;
+                    nextStateTime = currentTime + REWARD_DELAY_DURATION;
+                    break;
                     
-                case TEST_REWARD:
-                    // Handle reward test timing - implement dual-pulse pattern
-                    if (currentTime < stateStartTime + REWARD_PULSE1_DURATION) {
-                        // First pulse happening
-                    } 
-                    else if (currentTime < stateStartTime + REWARD_PULSE1_DURATION + REWARD_DELAY_DURATION) {
-                        // Delay between pulses
-                        if (digitalRead(REWARD_PIN) == HIGH) {
-                            digitalWrite(REWARD_PIN, LOW);
-                            logEvent(EVENT_REWARD_OFF);
-                        }
-                    }
-                    else if (currentTime < stateStartTime + REWARD_PULSE1_DURATION + REWARD_DELAY_DURATION + REWARD_PULSE2_DURATION) {
-                        // Second pulse
-                        if (digitalRead(REWARD_PIN) == LOW) {
-                            digitalWrite(REWARD_PIN, HIGH);
-                            logEvent(EVENT_REWARD_ON);
-                        }
-                    }
-                    else {
-                        // Test complete
-                        digitalWrite(REWARD_PIN, LOW);
-                        logEvent(EVENT_REWARD_OFF);
-                        state = IDLE;
-                        Serial.println("TEST_REWARD_COMPLETE");
-                    }
+                case TEST_REWARD_DELAY:
+                    // End of delay - start second pulse
+                    setReward(true);
+                    state = TEST_REWARD2;
+                    stateStartTime = currentTime;
+                    nextStateTime = currentTime + REWARD_PULSE2_DURATION;
+                    break;
+                    
+                case TEST_REWARD2:
+                    // End of second pulse
+                    setReward(false);
+                    state = IDLE;
+                    Serial.println("TEST_REWARD_COMPLETE");
                     break;
                     
                 default:
@@ -313,6 +326,13 @@ public:
             logEvent(EVENT_LICK);
         }
         lastLickState = currentLickState;
+        
+        // Safety check - ensure reward is not stuck on
+        if (rewardActive && state != REWARD_PULSE1 && state != REWARD_PULSE2 
+            && state != TEST_REWARD1 && state != TEST_REWARD2) {
+            // If reward is on but we're not in a reward pulse state, turn it off
+            setReward(false);
+        }
     }
     
     void processCommand(const String& command) {
@@ -400,6 +420,8 @@ public:
             Serial.print(odor1Active ? "ON" : "OFF");
             Serial.print(",O2:");
             Serial.print(odor2Active ? "ON" : "OFF");
+            Serial.print(",Reward:");
+            Serial.print(rewardActive ? "ON" : "OFF");
             Serial.print(",Licks:");
             Serial.print(lickCount);
             Serial.print(",LastLick:");
@@ -450,6 +472,20 @@ public:
             } else {
                 Serial.println("ERROR:BUSY");
             }
+        }
+        else if (command == "MANUAL_REWARD_ON") {
+            // Directly control reward for manual testing
+            if (state == IDLE) {
+                setReward(true);
+                Serial.println("MANUAL_REWARD:ON");
+            } else {
+                Serial.println("ERROR:BUSY");
+            }
+        }
+        else if (command == "MANUAL_REWARD_OFF") {
+            // Directly control reward for manual testing
+            setReward(false);
+            Serial.println("MANUAL_REWARD:OFF");
         }
         else if (command == "TEST_LICK") {
             // Reset lick counter and report current status

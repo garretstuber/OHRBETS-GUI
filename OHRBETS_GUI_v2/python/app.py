@@ -171,6 +171,9 @@ def main():
     
     if 'last_lick_time' not in st.session_state:
         st.session_state.last_lick_time = 0
+        
+    if 'manual_reward_active' not in st.session_state:
+        st.session_state.manual_reward_active = False
     
     # Create a placeholder for auto-refresh if session is running
     refresh_placeholder = st.empty()
@@ -198,6 +201,10 @@ def main():
                         st.rerun()
             else:
                 if st.button("Disconnect"):
+                    # Make sure to turn off any manual reward first
+                    if st.session_state.manual_reward_active:
+                        st.session_state.arduino.send_command("MANUAL_REWARD_OFF")
+                        st.session_state.manual_reward_active = False
                     st.session_state.arduino.disconnect()
                     st.session_state.status = "Disconnected"
                     st.rerun()
@@ -227,6 +234,7 @@ def main():
             st.write("Test hardware components before starting a session:")
             
             # Odor valve test buttons
+            st.write("**Odor Valves:**")
             col_odor1, col_odor2 = st.columns(2)
             with col_odor1:
                 if st.button("Test Odor 1"):
@@ -237,12 +245,37 @@ def main():
                     if st.session_state.arduino.send_command("TEST_ODOR2"):
                         st.success("Odor 2 valve activated for 1 second")
             
-            # Reward solenoid test
-            if st.button("Test Reward Solenoid"):
+            # Reward control
+            st.write("**Reward Solenoid:**")
+            
+            # Two-pulse pattern test
+            if st.button("Test Reward Pattern"):
                 if st.session_state.arduino.send_command("TEST_REWARD"):
-                    st.success("Reward solenoid activated (40ms on, 180ms off, 40ms on)")
+                    st.success("Reward solenoid activated (40ms on, 140ms off, 20ms on)")
+            
+            # Manual reward control
+            st.write("Direct Reward Control:")
+            col_reward_on, col_reward_off = st.columns(2)
+            with col_reward_on:
+                if not st.session_state.manual_reward_active:
+                    if st.button("Reward ON", type="primary"):
+                        if st.session_state.arduino.send_command("MANUAL_REWARD_ON"):
+                            st.session_state.manual_reward_active = True
+                            st.rerun()
+            
+            with col_reward_off:
+                if st.session_state.manual_reward_active:
+                    if st.button("Reward OFF", type="primary"):
+                        if st.session_state.arduino.send_command("MANUAL_REWARD_OFF"):
+                            st.session_state.manual_reward_active = False
+                            st.rerun()
+            
+            # Warning if manual reward is active
+            if st.session_state.manual_reward_active:
+                st.warning("⚠️ Reward solenoid is currently ON. Click 'Reward OFF' to deactivate.")
             
             # Lick sensor test
+            st.write("**Lick Sensor:**")
             col_lick_test, col_reset_lick = st.columns(2)
             with col_lick_test:
                 if not st.session_state.lick_test_active:
@@ -315,6 +348,10 @@ def main():
         
         if st.session_state.arduino.connected:
             if not st.session_state.session_running:
+                # Ensure manual reward is off before starting a session
+                if st.session_state.manual_reward_active:
+                    st.warning("⚠️ Turn off manual reward control before starting a session.")
+                
                 col_send, col_start = st.columns(2)
                 
                 with col_send:
@@ -324,7 +361,8 @@ def main():
                             st.success(f"Sequence sent with {sequence.count(',')+1} trials")
                 
                 with col_start:
-                    if st.button("Start Session"):
+                    start_disabled = st.session_state.manual_reward_active
+                    if st.button("Start Session", disabled=start_disabled):
                         st.session_state.arduino.send_command("START")
                         st.session_state.session_running = True
                         st.session_state.start_time = time.time()
@@ -523,6 +561,21 @@ def main():
                     st.session_state.lick_count = int(lick_part)
                 except:
                     pass
+            
+            # Check reward state
+            if "Reward:ON" in message:
+                st.session_state.manual_reward_active = True
+            elif "Reward:OFF" in message:
+                st.session_state.manual_reward_active = False
+                
+            return
+        
+        # Manual reward control messages
+        if message.startswith("MANUAL_REWARD:"):
+            if message.endswith("ON"):
+                st.session_state.manual_reward_active = True
+            elif message.endswith("OFF"):
+                st.session_state.manual_reward_active = False
             return
             
         # Lick test status messages
@@ -571,7 +624,7 @@ def main():
     st.session_state.arduino.status_callback = handle_status
     
     # Auto-refresh during session to update timer
-    if st.session_state.session_running or st.session_state.lick_test_active:
+    if st.session_state.session_running or st.session_state.lick_test_active or st.session_state.manual_reward_active:
         refresh_placeholder.empty()
         time.sleep(0.1)  # Small delay to not overwhelm the system
         st.rerun()
