@@ -1,4 +1,4 @@
-# OHRBETS GUI: Olfactory Head-fixed Reward-Based Entrainment Training System
+# OHRBETS GUI
 
 A comprehensive system for Pavlovian odor conditioning experiments, featuring precise Arduino-based hardware control and advanced Python visualization.
 
