@@ -1,82 +1,118 @@
-# Pavlovian Odor Conditioning Analysis Dashboard
+# OHRBETS GUI: Python Interface
 
-A data visualization and analysis tool for Pavlovian conditioning experiments with odor stimuli and licking responses.
+## Overview
 
-![Dashboard Preview](dashboard_preview.png)
+This Python interface provides a user-friendly graphical interface for controlling the OHRBETS (Olfactory Head-fixed Reward-Based Entrainment Training System) using an Arduino-based state machine. The system is designed for Pavlovian odor conditioning experiments where precise timing of odor delivery and reward is critical.
 
 ## Features
 
-- **Real-time visualization** of licking behavior during experiments
-- **Offline analysis** of previously collected data
-- **Interactive plots** to explore behavioral patterns:
-  - Raster plots showing individual licks aligned to odor onset
-  - Heatmaps displaying lick density across trials
-  - Mean lick rate timecourse with SEM bands
-  - Learning curves tracking discrimination improvement
-  - CS+ vs CS- comparative analysis
-- **Statistical analysis** of differences between CS+ and CS- trials
-- **Exportable reports** in HTML format for documentation and sharing
+- Real-time control of the Arduino-based Pavlovian conditioning system
+- Live monitoring of experimental events (trial starts, odor delivery, rewards, licks)
+- Dynamic visualization of behavioral data
+- Hardware testing interface for ensuring all components work properly
+- Data export for offline analysis
 
-## Getting Started
+## New Visualization Features
 
-### Prerequisites
+The system now includes three distinct visualization interfaces:
 
-- Python 3.7 or higher
-- Required Python packages: streamlit, pandas, numpy, plotly, scipy
-  (These will be automatically installed if missing)
+1. **Main Experiment Interface (app.py)**
+   - Real-time trial timeline visualization
+   - Enhanced raster plots with trial-by-trial response visualization
+   - Lick rate analysis during the experiment
 
-### Running the Dashboard
+2. **Post-Experiment Dashboard (dashboard.py)**
+   - Comprehensive analysis of experimental data
+   - Statistical comparisons between CS+ and CS- trials
+   - Multiple visualization types (raster, heatmap, learning curves)
+   - Report generation
 
-1. Make the script executable (one-time setup):
-   ```bash
-   chmod +x run_dashboard.sh
-   ```
+3. **Animated Analysis Dashboard (animated_analysis.py)**
+   - Trial-by-trial animated heatmaps showing learning progression
+   - Animated learning curves demonstrating behavioral acquisition
+   - Dynamic visualization of response profiles
+   - Interactive animations with playback controls
 
-2. Run the dashboard:
-   ```bash
-   ./run_dashboard.sh
-   ```
+## Installation
 
-Or manually with:
+1. Install required packages:
+
 ```bash
-streamlit run dashboard.py
+pip install -r requirements.txt
 ```
 
-The dashboard will open in your default web browser.
+2. Connect Arduino to USB port
+3. Upload the `fsm_pavlovian_odor.ino` sketch to the Arduino
 
-## Using the Dashboard
+## Running the Application
 
-### Data Input
+You can use the convenient `run_ohrbets.py` script to launch different components:
 
-- **Upload CSV files** containing experimental data
-- **Use example data** for demonstration and testing
-- **View live data** during ongoing experiments (when connected to Arduino)
+```bash
+# Run the main experiment interface (default)
+python run_ohrbets.py app
 
-### Customizing Visualizations
+# Run the post-experiment analysis dashboard
+python run_ohrbets.py dashboard
 
-Use the sidebar to:
-- Select which plots to display
-- Adjust time windows
-- Change learning curve bin sizes
-- Configure other visualization parameters
+# Run the animated visualization dashboard
+python run_ohrbets.py animated
 
-### Exporting Results
+# Show help
+python run_ohrbets.py help
+```
 
-- **Download HTML reports** containing all visualizations and analysis results
-- **Save CSV data** from experimental sessions
+Alternatively, you can run each component directly with Streamlit:
 
-## Data Format
+```bash
+# Main experiment interface
+streamlit run app.py
 
-The dashboard expects CSV files with the following columns:
-- `event_code`: Integer code for event type (1=Trial Start, 2=Trial End, 3=Odor On, 4=Odor Off, 5=Reward On, 6=Reward Off, 7=Lick)
-- `event_name`: Text description of event (optional)
-- `timestamp`: Time in seconds
-- `trial_number`: Integer trial identifier
-- `trial_type`: 1 for CS+ trials, 2 for CS- trials
+# Post-experiment analysis dashboard
+streamlit run dashboard.py
+
+# Animated visualization dashboard
+streamlit run animated_analysis.py
+```
+
+## Hardware Connections
+
+The software expects the Arduino to have the following connections:
+
+- Pin 2: Odor 1 solenoid (CS+)
+- Pin 3: Odor 2 solenoid (CS-)
+- Pin 4: Reward solenoid
+- Pin 5: Lick sensor
+
+## Usage Guide
+
+### Experiment Setup
+
+1. Connect to Arduino using the dropdown menu
+2. Test hardware components to ensure proper function
+3. Configure experiment parameters:
+   - Inter-trial interval (ITI)
+   - Odor presentation duration
+   - Reward parameters
+4. Set trial sequence (or generate a random balanced sequence)
+5. Start the session
+
+### During Experiment
+
+- Monitor lick behavior in real-time
+- Track progress through trial sequence
+- Visualize response patterns as they develop
+- Abort session if necessary
+
+### After Experiment
+
+- Download data as CSV
+- Use the dashboard for detailed analysis
+- Use the animated analysis for engaging visualizations of learning
 
 ## Contributing
 
-Contributions to improve the dashboard are welcome. Please feel free to submit issues or pull requests.
+Contributions to improve the OHRBETS GUI are welcome! Please feel free to submit pull requests or open issues on GitHub.
 
 ## License
 
