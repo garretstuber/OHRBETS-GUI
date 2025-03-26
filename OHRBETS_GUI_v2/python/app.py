@@ -163,6 +163,15 @@ def main():
     if 'arduino_status' not in st.session_state:
         st.session_state.arduino_status = ""
     
+    if 'lick_test_active' not in st.session_state:
+        st.session_state.lick_test_active = False
+    
+    if 'lick_count' not in st.session_state:
+        st.session_state.lick_count = 0
+    
+    if 'last_lick_time' not in st.session_state:
+        st.session_state.last_lick_time = 0
+    
     # Create a placeholder for auto-refresh if session is running
     refresh_placeholder = st.empty()
     
@@ -211,6 +220,58 @@ def main():
         # Arduino status display
         if st.session_state.arduino_status:
             st.code(st.session_state.arduino_status)
+        
+        # Hardware Test Section
+        if st.session_state.arduino.connected and not st.session_state.session_running:
+            st.write("### Hardware Testing")
+            st.write("Test hardware components before starting a session:")
+            
+            # Odor valve test buttons
+            col_odor1, col_odor2 = st.columns(2)
+            with col_odor1:
+                if st.button("Test Odor 1"):
+                    if st.session_state.arduino.send_command("TEST_ODOR1"):
+                        st.success("Odor 1 valve activated for 1 second")
+            with col_odor2:
+                if st.button("Test Odor 2"):
+                    if st.session_state.arduino.send_command("TEST_ODOR2"):
+                        st.success("Odor 2 valve activated for 1 second")
+            
+            # Reward solenoid test
+            if st.button("Test Reward Solenoid"):
+                if st.session_state.arduino.send_command("TEST_REWARD"):
+                    st.success("Reward solenoid activated (40ms on, 180ms off, 40ms on)")
+            
+            # Lick sensor test
+            col_lick_test, col_reset_lick = st.columns(2)
+            with col_lick_test:
+                if not st.session_state.lick_test_active:
+                    if st.button("Test Lick Sensor"):
+                        if st.session_state.arduino.send_command("TEST_LICK"):
+                            st.session_state.lick_test_active = True
+                            st.session_state.lick_count = 0
+                            st.rerun()
+                else:
+                    if st.button("Stop Lick Test", type="primary"):
+                        st.session_state.lick_test_active = False
+                        st.rerun()
+            
+            with col_reset_lick:
+                if st.button("Reset Lick Count"):
+                    if st.session_state.arduino.send_command("RESET_LICK_COUNT"):
+                        st.session_state.lick_count = 0
+                        st.rerun()
+            
+            # Lick sensor readings display
+            if st.session_state.lick_test_active:
+                st.markdown(f"""
+                <div style="background-color:#f0f2f6; padding:10px; border-radius:5px; margin-top:10px;">
+                    <div style="text-align:center;"><b>Lick Sensor Test Active</b></div>
+                    <div>Lick Count: <b>{st.session_state.lick_count}</b></div>
+                    <div>Last Lick: <b>{st.session_state.last_lick_time}</b></div>
+                    <div><small>Tap on the lick sensor to test</small></div>
+                </div>
+                """, unsafe_allow_html=True)
         
         # Experiment settings
         st.write("### Experiment Settings")
@@ -430,6 +491,11 @@ def main():
             trial_starts = [row for row in st.session_state.arduino.data if row[0] == 1]
             trial_number = len(trial_starts)
             trial_type = None
+            
+            # Update lick count for lick sensor test
+            if event_code == 7 and st.session_state.lick_test_active:  # Lick event
+                st.session_state.lick_count += 1
+                st.session_state.last_lick_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         
         # Add to dataframe
         new_row = pd.DataFrame({
@@ -449,11 +515,36 @@ def main():
         if message.startswith("STATUS:"):
             # Store the status for display
             st.session_state.arduino_status = message
+            
+            # Parse lick information from status if lick test is active
+            if st.session_state.lick_test_active and "Licks:" in message:
+                try:
+                    lick_part = message.split("Licks:")[1].split(",")[0]
+                    st.session_state.lick_count = int(lick_part)
+                except:
+                    pass
+            return
+            
+        # Lick test status messages
+        if message == "LICK_TEST:MONITORING":
+            st.session_state.lick_test_active = True
+            return
+        
+        if message == "LICK_COUNT_RESET":
+            st.session_state.lick_count = 0
             return
             
         # Only update status if it's one of these important messages
         important_messages = ["SESSION_STARTED", "SESSION_COMPLETE", "SESSION_ABORTED", 
                               "READY", "SEQUENCE_RECEIVED", "TIMING_SET"]
+        
+        # Handle test messages
+        if any(message.startswith(prefix) for prefix in ["TEST_ODOR", "TEST_REWARD"]):
+            if message.endswith("_COMPLETE"):
+                st.session_state.status = "Test completed"
+            elif message.endswith("_START"):
+                st.session_state.status = "Test in progress"
+            return
         
         if message in important_messages or any(message.startswith(prefix) for prefix in ["SEQUENCE_RECEIVED:", "TIMING_SET:"]):
             if message == "SESSION_STARTED":
@@ -480,7 +571,7 @@ def main():
     st.session_state.arduino.status_callback = handle_status
     
     # Auto-refresh during session to update timer
-    if st.session_state.session_running:
+    if st.session_state.session_running or st.session_state.lick_test_active:
         refresh_placeholder.empty()
         time.sleep(0.1)  # Small delay to not overwhelm the system
         st.rerun()

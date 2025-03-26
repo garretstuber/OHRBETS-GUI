@@ -22,6 +22,10 @@
 #define REWARD_DELAY_DURATION   180   // Delay between pulses (ms)
 #define REWARD_PULSE2_DURATION  40    // Second reward pulse (ms)
 
+// Manual test durations
+#define TEST_ODOR_DURATION    1000    // 1 second for manual odor test
+#define TEST_REWARD_DURATION  260     // Combined duration of reward sequence (40+180+40)
+
 // Timing precision: use microseconds for all timestamps
 // State machine: use non-blocking design with millis() for state transitions
 
@@ -36,7 +40,11 @@ private:
         REWARD_DELAY,
         REWARD_PULSE2,
         POST_REWARD,
-        COMPLETE
+        COMPLETE,
+        // Test states
+        TEST_ODOR1,
+        TEST_ODOR2,
+        TEST_REWARD
     };
     
     State state = IDLE;
@@ -61,6 +69,10 @@ private:
     // Odor state tracking
     bool odor1Active = false;
     bool odor2Active = false;
+    
+    // Lick sensor tracking
+    unsigned long lastLickTime = 0;
+    int lickCount = 0;
     
     // Methods for hardware control
     void setOdor(int type, bool state) {
@@ -124,6 +136,15 @@ private:
         digitalWrite(REWARD_PIN, LOW);
         odor1Active = false;
         odor2Active = false;
+    }
+    
+    // Test reward with 2-pulse pattern
+    void startTestReward() {
+        state = TEST_REWARD;
+        stateStartTime = millis();
+        nextStateTime = stateStartTime + REWARD_PULSE1_DURATION;
+        setReward(true);
+        Serial.println("TEST_REWARD_START");
     }
 
 public:
@@ -231,6 +252,51 @@ public:
                         logEvent(EVENT_TRIAL_START);
                     }
                     break;
+                
+                // Test states for hardware validation
+                case TEST_ODOR1:
+                    // Turn off odor after test duration
+                    digitalWrite(ODOR1_PIN, LOW);
+                    odor1Active = false;
+                    state = IDLE;
+                    Serial.println("TEST_ODOR1_COMPLETE");
+                    break;
+                    
+                case TEST_ODOR2:
+                    // Turn off odor after test duration
+                    digitalWrite(ODOR2_PIN, LOW);
+                    odor2Active = false;
+                    state = IDLE;
+                    Serial.println("TEST_ODOR2_COMPLETE");
+                    break;
+                    
+                case TEST_REWARD:
+                    // Handle reward test timing - implement dual-pulse pattern
+                    if (currentTime < stateStartTime + REWARD_PULSE1_DURATION) {
+                        // First pulse happening
+                    } 
+                    else if (currentTime < stateStartTime + REWARD_PULSE1_DURATION + REWARD_DELAY_DURATION) {
+                        // Delay between pulses
+                        if (digitalRead(REWARD_PIN) == HIGH) {
+                            digitalWrite(REWARD_PIN, LOW);
+                            logEvent(EVENT_REWARD_OFF);
+                        }
+                    }
+                    else if (currentTime < stateStartTime + REWARD_PULSE1_DURATION + REWARD_DELAY_DURATION + REWARD_PULSE2_DURATION) {
+                        // Second pulse
+                        if (digitalRead(REWARD_PIN) == LOW) {
+                            digitalWrite(REWARD_PIN, HIGH);
+                            logEvent(EVENT_REWARD_ON);
+                        }
+                    }
+                    else {
+                        // Test complete
+                        digitalWrite(REWARD_PIN, LOW);
+                        logEvent(EVENT_REWARD_OFF);
+                        state = IDLE;
+                        Serial.println("TEST_REWARD_COMPLETE");
+                    }
+                    break;
                     
                 default:
                     break;
@@ -242,6 +308,8 @@ public:
         bool currentLickState = digitalRead(LICK_PIN);
         if (currentLickState != lastLickState && currentLickState == LOW) {
             // Lick detected (falling edge)
+            lastLickTime = millis();
+            lickCount++;
             logEvent(EVENT_LICK);
         }
         lastLickState = currentLickState;
@@ -302,6 +370,7 @@ public:
             Serial.println(numTrials);
         }
         else if (command == "START") {
+            // Only start if in IDLE state and not running tests
             if (state == IDLE && numTrials > 0) {
                 // Start session
                 currentTrial = 0;
@@ -330,7 +399,68 @@ public:
             Serial.print(",O1:");
             Serial.print(odor1Active ? "ON" : "OFF");
             Serial.print(",O2:");
-            Serial.println(odor2Active ? "ON" : "OFF");
+            Serial.print(odor2Active ? "ON" : "OFF");
+            Serial.print(",Licks:");
+            Serial.print(lickCount);
+            Serial.print(",LastLick:");
+            Serial.println(lastLickTime);
+        }
+        else if (command == "TEST_ODOR1") {
+            // Only allow test if in IDLE state
+            if (state == IDLE) {
+                // Turn on Odor 1 for testing
+                digitalWrite(ODOR1_PIN, HIGH);
+                odor1Active = true;
+                digitalWrite(ODOR2_PIN, LOW);
+                odor2Active = false;
+                logEvent(EVENT_ODOR_ON);
+                
+                // Set timer to turn off after test duration
+                state = TEST_ODOR1;
+                stateStartTime = millis();
+                nextStateTime = stateStartTime + TEST_ODOR_DURATION;
+                Serial.println("TEST_ODOR1_START");
+            } else {
+                Serial.println("ERROR:BUSY");
+            }
+        }
+        else if (command == "TEST_ODOR2") {
+            // Only allow test if in IDLE state
+            if (state == IDLE) {
+                // Turn on Odor 2 for testing
+                digitalWrite(ODOR2_PIN, HIGH);
+                odor2Active = true;
+                digitalWrite(ODOR1_PIN, LOW);
+                odor1Active = false;
+                logEvent(EVENT_ODOR_ON);
+                
+                // Set timer to turn off after test duration
+                state = TEST_ODOR2;
+                stateStartTime = millis();
+                nextStateTime = stateStartTime + TEST_ODOR_DURATION;
+                Serial.println("TEST_ODOR2_START");
+            } else {
+                Serial.println("ERROR:BUSY");
+            }
+        }
+        else if (command == "TEST_REWARD") {
+            // Only allow test if in IDLE state
+            if (state == IDLE) {
+                startTestReward();
+            } else {
+                Serial.println("ERROR:BUSY");
+            }
+        }
+        else if (command == "TEST_LICK") {
+            // Reset lick counter and report current status
+            lickCount = 0;
+            lastLickTime = 0;
+            Serial.println("LICK_TEST:MONITORING");
+        }
+        else if (command == "RESET_LICK_COUNT") {
+            // Reset lick counter
+            lickCount = 0;
+            Serial.println("LICK_COUNT_RESET");
         }
     }
 };
