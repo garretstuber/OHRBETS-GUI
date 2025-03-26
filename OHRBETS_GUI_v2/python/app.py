@@ -251,7 +251,7 @@ def main():
             # Two-pulse pattern test
             if st.button("Test Reward Pattern"):
                 if st.session_state.arduino.send_command("TEST_REWARD"):
-                    st.success("Reward solenoid activated (40ms on, 140ms off, 20ms on)")
+                    st.success("Reward solenoid activated (40ms on, 140ms off, 40ms on)")
             
             # Manual reward control
             st.write("Direct Reward Control:")

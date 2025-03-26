@@ -19,12 +19,12 @@
 
 // Reward delivery pattern
 #define REWARD_PULSE1_DURATION  40    // First reward pulse (ms)
-#define REWARD_DELAY_DURATION   140   // Delay between pulses (ms) - changed from 180 to 140
-#define REWARD_PULSE2_DURATION  20    // Second reward pulse (ms) - changed from 40 to 20
+#define REWARD_DELAY_DURATION   140   // Delay between pulses (ms)
+#define REWARD_PULSE2_DURATION  40    // Second reward pulse (ms) - changed from 20 to 40
 
 // Manual test durations
 #define TEST_ODOR_DURATION    1000    // 1 second for manual odor test
-#define TEST_REWARD_DURATION  200     // Combined duration of reward sequence (40+140+20)
+#define TEST_REWARD_DURATION  220     // Combined duration of reward sequence (40+140+40)
 
 // Timing precision: use microseconds for all timestamps
 // State machine: use non-blocking design with millis() for state transitions
