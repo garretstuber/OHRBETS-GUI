@@ -1,4 +1,4 @@
-# OHRBETS GUI: Pavlovian Odor Conditioning System
+# OHRBETS GUI
 
 ## Overview
 
