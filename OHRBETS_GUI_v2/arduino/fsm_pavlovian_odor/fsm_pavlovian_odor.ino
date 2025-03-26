@@ -46,6 +46,10 @@ private:
     int odorDuration = 2000;        // Configurable
     int rewardDuration = 500;       // Configurable
     
+    // LED blink timing (non-blocking)
+    unsigned long ledOffTime = 0;
+    bool ledBlinking = false;
+    
     // Methods for hardware control
     void setOdor(int type, bool state) {
         digitalWrite(type == 1 ? ODOR1_PIN : ODOR2_PIN, state ? HIGH : LOW);
@@ -58,17 +62,28 @@ private:
     }
     
     void logEvent(int eventCode) {
+        // Get timestamp first for accuracy
         unsigned long timestamp = micros();  // Microsecond precision
+        
+        // Send data without delays
         Serial.print("DATA:");
         Serial.print(eventCode);
         Serial.print(",");
         Serial.println(timestamp);
         Serial.flush();
         
-        // Visual feedback
+        // Trigger LED blink (non-blocking)
         digitalWrite(LED_PIN, HIGH);
-        delay(1);
-        digitalWrite(LED_PIN, LOW);
+        ledBlinking = true;
+        ledOffTime = millis() + 2; // 2ms blink
+    }
+    
+    void updateLED() {
+        // Non-blocking LED blink
+        if (ledBlinking && millis() >= ledOffTime) {
+            digitalWrite(LED_PIN, LOW);
+            ledBlinking = false;
+        }
     }
 
 public:
@@ -92,6 +107,9 @@ public:
     }
     
     void update() {
+        // Update LED state (non-blocking)
+        updateLED();
+        
         // Non-blocking state machine
         unsigned long currentTime = millis();
         
@@ -258,6 +276,6 @@ void loop() {
     // Update state machine
     controller.update();
     
-    // Very small delay to prevent overwhelming serial
-    delay(1);
+    // No delay needed - the Arduino loop is already fast enough
+    // and we're using non-blocking timing throughout
 } 
