@@ -8,6 +8,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 from datetime import datetime
+import queue
 
 # Event code mappings
 EVENT_NAMES = {
@@ -29,6 +30,7 @@ class ArduinoInterface:
         self.status_callback = None
         self.thread = None
         self.data = []  # Store event data
+        self.message_queue = queue.Queue()  # Queue for thread-safe communication
         
     def get_ports(self):
         """Get available serial ports"""
@@ -54,8 +56,7 @@ class ArduinoInterface:
             
             return True
         except Exception as e:
-            if self.status_callback:
-                self.status_callback(f"Connection error: {str(e)}")
+            self.message_queue.put(("status", f"Connection error: {str(e)}"))
             return False
     
     def disconnect(self):
@@ -83,8 +84,7 @@ class ArduinoInterface:
             self.serial.flush()
             return True
         except Exception as e:
-            if self.status_callback:
-                self.status_callback(f"Send error: {str(e)}")
+            self.message_queue.put(("status", f"Send error: {str(e)}"))
             return False
     
     def _read_loop(self):
@@ -96,8 +96,7 @@ class ArduinoInterface:
                     if line:
                         self._process_message(line)
             except Exception as e:
-                if self.status_callback:
-                    self.status_callback(f"Read error: {str(e)}")
+                self.message_queue.put(("status", f"Read error: {str(e)}"))
                 break
             
             time.sleep(0.01)  # Small delay
@@ -116,15 +115,22 @@ class ArduinoInterface:
                     # Add to data list
                     self.data.append((event_code, timestamp))
                     
-                    # Call data callback if registered
-                    if self.data_callback:
-                        self.data_callback(event_code, timestamp)
+                    # Put data in queue for main thread to process
+                    self.message_queue.put(("data", (event_code, timestamp)))
                 except ValueError:
                     pass
         else:
             # Status messages
-            if self.status_callback:
-                self.status_callback(message)
+            self.message_queue.put(("status", message))
+
+    def process_queue(self):
+        """Process messages from the queue in the main thread"""
+        while not self.message_queue.empty():
+            msg_type, data = self.message_queue.get()
+            if msg_type == "data" and self.data_callback:
+                self.data_callback(*data)
+            elif msg_type == "status" and self.status_callback:
+                self.status_callback(data)
 
 def main():
     st.set_page_config(
@@ -151,6 +157,9 @@ def main():
     if 'start_time' not in st.session_state:
         st.session_state.start_time = None
     
+    # Process any queued messages from Arduino thread
+    st.session_state.arduino.process_queue()
+    
     # Set up layout
     col1, col2 = st.columns([1, 3])
     
@@ -168,16 +177,16 @@ def main():
                 if st.button("Connect"):
                     if st.session_state.arduino.connect(selected_port):
                         st.session_state.status = "Connected to Arduino"
-                        st.experimental_rerun()
+                        st.rerun()
             else:
                 if st.button("Disconnect"):
                     st.session_state.arduino.disconnect()
                     st.session_state.status = "Disconnected"
-                    st.experimental_rerun()
+                    st.rerun()
         
         with col_refresh:
             if st.button("Refresh Ports"):
-                st.experimental_rerun()
+                st.rerun()
         
         # Experiment settings
         st.write("### Experiment Settings")
@@ -207,7 +216,7 @@ def main():
             np.random.shuffle(sequence_list)
             sequence = ','.join(map(str, sequence_list))
             st.session_state.sequence = sequence
-            st.experimental_rerun()
+            st.rerun()
         
         # Session control
         st.write("### Session Control")
@@ -227,12 +236,12 @@ def main():
                         st.session_state.session_running = True
                         st.session_state.start_time = time.time()
                         st.session_state.data = pd.DataFrame(columns=['event_code', 'event_name', 'timestamp', 'trial_number'])
-                        st.experimental_rerun()
+                        st.rerun()
             else:
                 if st.button("Abort Session", type="primary"):
                     st.session_state.arduino.send_command("ABORT")
                     st.session_state.session_running = False
-                    st.experimental_rerun()
+                    st.rerun()
         
         # Status and info
         st.write("### Status")
