@@ -1,154 +1,152 @@
-# OHRBETS GUI
-
-A comprehensive system for Pavlovian odor conditioning experiments, featuring precise Arduino-based hardware control and advanced Python visualization.
-
-![OHRBETS System](docs/system_overview.png)
+# OHRBETS GUI: Pavlovian Odor Conditioning System
 
 ## Overview
 
-OHRBETS GUI is a complete solution for conducting Pavlovian conditioning experiments using odor cues and reward delivery. The system consists of:
+OHRBETS GUI (Operant Hardware for Rodent Behavioral Experiments & Tracking System) is a comprehensive platform for conducting Pavlovian odor conditioning experiments. Developed by the Stuber Lab at the University of Washington, this system integrates Arduino-based hardware control with a Streamlit-powered Python dashboard for experiment configuration, real-time monitoring, and data analysis.
 
-1. **Arduino Controller**: A finite state machine that precisely controls hardware timing and event logging
-2. **Python Interface**: An intuitive GUI for experiment control and data visualization
-3. **Analysis Dashboard**: Tools for post-experiment analysis and visualization
+## Features
 
-## Key Features
+### Hardware Control
+- Arduino-based finite state machine for precise timing control
+- Automated trial sequencing with CS+ (rewarded) and CS- (unrewarded) odor cues
+- Solenoid control for water/reward delivery
+- Lick detection and timestamping
+- Real-time data transmission to GUI
 
-- **Precise Timing Control**: Microsecond-precision for all experimental events
-- **Real-time Visualization**: Monitor behavior as it happens
-- **Hardware Testing**: Built-in tools for validating all system components
-- **Data Analysis**: Comprehensive tools for understanding behavioral responses
-- **Animated Visualizations**: Dynamic representations of learning progression
-- **Safety Features**: Prevents hardware failures and experimental errors
+### Streamlit Dashboard
+- Real-time visualization of licking behavior
+- Experiment configuration interface
+- Comprehensive data analysis tools:
+  - Lick raster plots by trial type
+  - Mean lick rate timecourse
+  - Statistical comparison of CS+ vs CS- trials
+  - Learning curves across session
+  - Focused comparison of cue period (0-2s) vs reward period (2-5s)
+- Data simulation capabilities for testing and demonstration
 
-## New Visualization Features
+## System Requirements
 
-The system now includes enhanced visualization capabilities:
+### Hardware
+- Arduino Uno/Mega microcontroller
+- Solenoid valves for odor delivery (2+)
+- Reward solenoid
+- Infrared beam break sensor for lick detection
+- Appropriate power supply
 
-### Real-time Experiment Visualization
-- Trial timeline showing events with precise timing
-- Dynamic raster plots that update during the experiment
-- Real-time lick rate analysis
-- CS+ vs CS- response comparison
-
-### Animated Analysis Dashboard
-- Trial-by-trial animated heatmaps showing learning progression
-- Animated learning curves demonstrating behavioral acquisition
-- Dynamic visualization of response profiles
-- Interactive animations with playback controls
-
-### Post-Experiment Dashboard
-- Comprehensive statistical analysis
-- Multiple visualization types
-- Report generation
-
-## Hardware Requirements
-
-- Arduino Uno or compatible board
-- Solenoid valves for odor delivery (2)
-- Solenoid valve for water reward
-- Lick sensor (capacitive or optical)
-- Appropriate tubing and connectors
-- Power supply for solenoids (12V recommended)
-
-## Software Requirements
-
-- Arduino IDE (for uploading firmware)
-- Python 3.7 or higher
-- Required Python packages (see `requirements.txt`)
+### Software
+- Python 3.9+
+- Arduino IDE
+- Required Python packages (see `OHRBETS_GUI_v2/python/requirements.txt`)
 
 ## Installation
 
 1. Clone this repository:
 ```bash
-git clone https://github.com/yourusername/OHRBETS_GUI.git
-cd OHRBETS_GUI
+git clone https://github.com/stuberlab/ohrbets-gui.git
+cd ohrbets-gui
 ```
 
-2. Install required Python packages:
+2. Install Python dependencies:
 ```bash
 pip install -r OHRBETS_GUI_v2/python/requirements.txt
 ```
 
-3. Upload the Arduino firmware:
+3. Upload Arduino sketch:
    - Open `OHRBETS_GUI_v2/arduino/fsm_pavlovian_odor/fsm_pavlovian_odor.ino` in the Arduino IDE
-   - Connect your Arduino board via USB
-   - Click Upload
+   - Connect your Arduino board
+   - Upload the sketch
 
 ## Usage
 
-### Running the System
+### Starting the Dashboard
 
-You can use the convenient `run_ohrbets.py` script to launch different components:
-
+Run the dashboard using the provided script:
 ```bash
-# Navigate to the Python directory
 cd OHRBETS_GUI_v2/python
-
-# Run the main experiment interface (default)
-python run_ohrbets.py app
-
-# Run the post-experiment analysis dashboard
-python run_ohrbets.py dashboard
-
-# Run the animated visualization dashboard
-python run_ohrbets.py animated
-
-# Show help
-python run_ohrbets.py help
+./run_dashboard.sh
 ```
 
-### Hardware Setup
+The dashboard will be available at http://localhost:8503
 
-1. Connect hardware components to Arduino pins:
-   - Pin 2: Odor 1 solenoid (CS+)
-   - Pin 3: Odor 2 solenoid (CS-)
-   - Pin 4: Reward solenoid
-   - Pin 5: Lick sensor
+### Experiment Workflow
 
-2. Connect Arduino to computer via USB
+1. **Configure the Experiment**
+   - Set animal ID and session parameters
+   - Configure trial sequence (balanced 50% CS+, 50% CS-)
+   - Set timing parameters (ITI, odor duration, reward duration)
 
-### Running an Experiment
+2. **Connect Hardware**
+   - Select the appropriate serial port
+   - Connect to the Arduino
 
-1. Launch the main app: `python run_ohrbets.py app`
-2. Connect to Arduino using the dropdown menu
-3. Test hardware components using the Testing section
-4. Configure experiment parameters:
-   - Timing (ITI, odor duration, etc.)
-   - Trial sequence
-5. Start session and monitor results in real-time
+3. **Run the Experiment**
+   - Send trial sequence to Arduino
+   - Start the session
+   - Monitor licking behavior in real-time
 
-### Data Analysis
+4. **Analyze Results**
+   - View summary statistics (total licks, CS+ vs CS- comparison)
+   - Examine lick rasters and heatmaps
+   - Analyze learning curve over session
+   - Export data for further analysis
 
-1. After the experiment, download the data as CSV
-2. Launch the analysis dashboard: `python run_ohrbets.py dashboard`
-3. Upload the CSV file to analyze results
-4. For animated visualizations: `python run_ohrbets.py animated`
+## File Structure
 
-## Folder Structure
+```
+OHRBETS_GUI/
+├── OHRBETS_GUI_v2/
+│   ├── arduino/
+│   │   └── fsm_pavlovian_odor/
+│   │       └── fsm_pavlovian_odor.ino  # Arduino finite state machine
+│   └── python/
+│       ├── analysis.py          # Data analysis functions
+│       ├── dashboard.py         # Streamlit dashboard interface
+│       ├── generate_test_data.py # Data simulation for testing
+│       ├── requirements.txt     # Python dependencies
+│       └── run_dashboard.sh     # Startup script
+└── README.md                    # This file
+```
 
-- `OHRBETS_GUI_v2/` - Main project directory
-  - `arduino/` - Arduino firmware
-    - `fsm_pavlovian_odor/` - Finite state machine implementation
-  - `python/` - Python GUI and analysis tools
-    - `app.py` - Main experiment interface
-    - `dashboard.py` - Post-experiment analysis dashboard
-    - `animated_analysis.py` - Animated visualization dashboard
-    - `real_time_viz.py` - Real-time visualization components
-    - `run_ohrbets.py` - Launcher script
+## Data Format
+
+### Event Codes
+- 1: Trial Start
+- 2: Trial End
+- 3: Odor On
+- 4: Odor Off
+- 5: Reward On
+- 6: Reward Off
+- 7: Lick
+
+### Output Files
+- `pavlovian_[animal-id]_[timestamp].csv`: Contains all event timestamps and codes
+
+## Simulated Data Profiles
+
+For testing and demonstration, the system can generate simulated data with different licking patterns:
+- **normal**: Standard conditioned response
+- **robust**: Strong discrimination between CS+ and CS-
+- **anticipatory**: Increased licking during cue before reward
+- **nonlearner**: Poor discrimination between CS+ and CS-
+
+## Troubleshooting
+
+- **Serial Connection Issues**: Ensure the Arduino is connected and no other program is using the serial port
+- **Missing Data**: Check that the Arduino is properly powered and the sketch is running
+- **Visualization Issues**: Clear browser cache and restart the Streamlit application
+- **Port Access Denied**: You may need to run with sudo/administrator permissions to access certain serial ports
 
 ## Contributing
 
-Contributions to improve OHRBETS GUI are welcome! Please feel free to submit issues or pull requests.
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+We welcome contributions to the OHRBETS GUI project. Please feel free to submit issues or pull requests through our GitHub repository.
 
 ## Acknowledgments
 
-- The Stuber Lab at UNC Chapel Hill for inspiration and testing
-- The open-source community for the libraries that made this project possible
+This project was developed by the Stuber Lab at the University of Washington for studying the neural mechanisms of reward learning and motivated behavior.
+
+## License
+
+MIT License
 
 ## Contact
 
