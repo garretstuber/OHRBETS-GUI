@@ -160,6 +160,9 @@ def main():
     if 'start_time' not in st.session_state:
         st.session_state.start_time = None
     
+    if 'arduino_status' not in st.session_state:
+        st.session_state.arduino_status = ""
+    
     # Create a placeholder for auto-refresh if session is running
     refresh_placeholder = st.empty()
     
@@ -194,9 +197,20 @@ def main():
             if st.button("Refresh Ports"):
                 st.rerun()
         
-        # Add debug refresh button
-        if st.button("Refresh Display"):
-            pass  # This just triggers a UI refresh
+        # Debug buttons
+        col_refresh_display, col_check_status = st.columns(2)
+        with col_refresh_display:
+            if st.button("Refresh Display"):
+                pass  # This just triggers a UI refresh
+                
+        with col_check_status:
+            if st.session_state.arduino.connected and st.button("Check Status"):
+                if st.session_state.arduino.send_command("STATUS"):
+                    st.success("Status request sent")
+        
+        # Arduino status display
+        if st.session_state.arduino_status:
+            st.code(st.session_state.arduino_status)
         
         # Experiment settings
         st.write("### Experiment Settings")
@@ -431,11 +445,17 @@ def main():
         st.session_state.data = pd.concat([st.session_state.data, new_row], ignore_index=True)
     
     def handle_status(message):
+        # Handle status messages from Arduino
+        if message.startswith("STATUS:"):
+            # Store the status for display
+            st.session_state.arduino_status = message
+            return
+            
         # Only update status if it's one of these important messages
         important_messages = ["SESSION_STARTED", "SESSION_COMPLETE", "SESSION_ABORTED", 
-                               "READY", "SEQUENCE_RECEIVED", "TIMING_SET"]
+                              "READY", "SEQUENCE_RECEIVED", "TIMING_SET"]
         
-        if message in important_messages:
+        if message in important_messages or any(message.startswith(prefix) for prefix in ["SEQUENCE_RECEIVED:", "TIMING_SET:"]):
             if message == "SESSION_STARTED":
                 st.session_state.status = "Session running"
                 st.session_state.session_running = True

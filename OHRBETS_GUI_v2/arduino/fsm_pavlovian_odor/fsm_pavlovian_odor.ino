@@ -17,6 +17,11 @@
 #define EVENT_REWARD_OFF     6
 #define EVENT_LICK           7
 
+// Reward delivery pattern
+#define REWARD_PULSE1_DURATION  40    // First reward pulse (ms)
+#define REWARD_DELAY_DURATION   180   // Delay between pulses (ms)
+#define REWARD_PULSE2_DURATION  40    // Second reward pulse (ms)
+
 // Timing precision: use microseconds for all timestamps
 // State machine: use non-blocking design with millis() for state transitions
 
@@ -27,7 +32,10 @@ private:
         IDLE,
         INTERTRIAL,
         ODOR,
-        REWARD,
+        REWARD_PULSE1,
+        REWARD_DELAY,
+        REWARD_PULSE2,
+        POST_REWARD,
         COMPLETE
     };
     
@@ -44,15 +52,38 @@ private:
     // Timing parameters (milliseconds)
     int intertrialInterval = 5000;  // Configurable
     int odorDuration = 2000;        // Configurable
-    int rewardDuration = 500;       // Configurable
+    int rewardDuration = 500;       // Total reward phase duration (configurable)
     
     // LED blink timing (non-blocking)
     unsigned long ledOffTime = 0;
     bool ledBlinking = false;
     
+    // Odor state tracking
+    bool odor1Active = false;
+    bool odor2Active = false;
+    
     // Methods for hardware control
     void setOdor(int type, bool state) {
-        digitalWrite(type == 1 ? ODOR1_PIN : ODOR2_PIN, state ? HIGH : LOW);
+        // Ensure proper pin control based on trial type
+        if (type == 1) {  // CS+
+            digitalWrite(ODOR1_PIN, state ? HIGH : LOW);
+            odor1Active = state;
+            // Ensure the other odor is off
+            if (state) {
+                digitalWrite(ODOR2_PIN, LOW);
+                odor2Active = false;
+            }
+        } else {  // CS-
+            digitalWrite(ODOR2_PIN, state ? HIGH : LOW);
+            odor2Active = state;
+            // Ensure the other odor is off
+            if (state) {
+                digitalWrite(ODOR1_PIN, LOW);
+                odor1Active = false;
+            }
+        }
+        
+        // Log event only after hardware has been set
         logEvent(state ? EVENT_ODOR_ON : EVENT_ODOR_OFF);
     }
     
@@ -85,6 +116,15 @@ private:
             ledBlinking = false;
         }
     }
+    
+    void emergencyStop() {
+        // Turn off all outputs
+        digitalWrite(ODOR1_PIN, LOW);
+        digitalWrite(ODOR2_PIN, LOW);
+        digitalWrite(REWARD_PIN, LOW);
+        odor1Active = false;
+        odor2Active = false;
+    }
 
 public:
     void begin() {
@@ -100,6 +140,10 @@ public:
         digitalWrite(ODOR1_PIN, LOW);
         digitalWrite(ODOR2_PIN, LOW);
         digitalWrite(REWARD_PIN, LOW);
+        
+        // Initialize state variables
+        odor1Active = false;
+        odor2Active = false;
         
         // Initialize serial
         Serial.begin(115200);
@@ -125,24 +169,51 @@ public:
                     break;
                     
                 case ODOR:
-                    // Turn off odor and transition to reward
+                    // Turn off odor and transition to reward sequence (for CS+) or post-reward (for CS-)
                     setOdor(currentTrialType, false);
-                    state = REWARD;
-                    stateStartTime = currentTime;
-                    nextStateTime = currentTime + rewardDuration;
                     
-                    // Only deliver reward for CS+ (type 1)
-                    if (currentTrialType == 1) {
+                    if (currentTrialType == 1) {  // CS+
+                        // First reward pulse
+                        state = REWARD_PULSE1;
+                        stateStartTime = currentTime;
+                        nextStateTime = currentTime + REWARD_PULSE1_DURATION;
                         setReward(true);
+                    } else {  // CS-
+                        // Skip reward and go to post-reward phase
+                        state = POST_REWARD;
+                        stateStartTime = currentTime;
+                        nextStateTime = currentTime + rewardDuration;
                     }
                     break;
                     
-                case REWARD:
-                    // End of trial
-                    if (currentTrialType == 1) {
-                        setReward(false);
-                    }
+                case REWARD_PULSE1:
+                    // Turn off reward and start delay
+                    setReward(false);
+                    state = REWARD_DELAY;
+                    stateStartTime = currentTime;
+                    nextStateTime = currentTime + REWARD_DELAY_DURATION;
+                    break;
                     
+                case REWARD_DELAY:
+                    // Second reward pulse
+                    state = REWARD_PULSE2;
+                    stateStartTime = currentTime;
+                    nextStateTime = currentTime + REWARD_PULSE2_DURATION;
+                    setReward(true);
+                    break;
+                    
+                case REWARD_PULSE2:
+                    // Turn off reward and go to post-reward phase
+                    setReward(false);
+                    state = POST_REWARD;
+                    stateStartTime = currentTime;
+                    // Calculate remaining time in reward phase
+                    unsigned long totalElapsed = currentTime - (stateStartTime - REWARD_PULSE1_DURATION - REWARD_DELAY_DURATION);
+                    unsigned long remainingTime = (totalElapsed >= rewardDuration) ? 0 : (rewardDuration - totalElapsed);
+                    nextStateTime = currentTime + remainingTime;
+                    break;
+                    
+                case POST_REWARD:
                     // Log trial end
                     logEvent(EVENT_TRIAL_END);
                     
@@ -244,11 +315,22 @@ public:
         }
         else if (command == "ABORT") {
             // Emergency stop
-            setOdor(1, false);
-            setOdor(2, false);
-            setReward(false);
+            emergencyStop();
             state = IDLE;
             Serial.println("SESSION_ABORTED");
+        }
+        else if (command == "STATUS") {
+            // Report current status
+            Serial.print("STATUS:");
+            Serial.print(state);
+            Serial.print(",");
+            Serial.print(currentTrial);
+            Serial.print("/");
+            Serial.print(numTrials);
+            Serial.print(",O1:");
+            Serial.print(odor1Active ? "ON" : "OFF");
+            Serial.print(",O2:");
+            Serial.println(odor2Active ? "ON" : "OFF");
         }
     }
 };
@@ -275,7 +357,4 @@ void loop() {
     
     // Update state machine
     controller.update();
-    
-    // No delay needed - the Arduino loop is already fast enough
-    // and we're using non-blocking timing throughout
 } 
