@@ -9,6 +9,8 @@ import plotly.graph_objects as go
 import numpy as np
 from datetime import datetime
 import queue
+# Import the real-time visualization module
+from real_time_viz import create_real_time_dashboard, RealTimeVisualizer
 
 # Event code mappings
 EVENT_NAMES = {
@@ -110,7 +112,7 @@ class ArduinoInterface:
             if len(parts) == 2:
                 try:
                     event_code = int(parts[0])
-                    timestamp = float(parts[1]) / 1000000.0  # Convert microseconds to seconds
+                    timestamp = float(parts[1]) / 1000.0  # Convert milliseconds to seconds
                     
                     # Add to data list
                     self.data.append((event_code, timestamp))
@@ -175,6 +177,9 @@ def main():
     if 'manual_reward_active' not in st.session_state:
         st.session_state.manual_reward_active = False
     
+    if 'manual_odor_active' not in st.session_state:
+        st.session_state.manual_odor_active = False
+    
     # Create a placeholder for auto-refresh if session is running
     refresh_placeholder = st.empty()
     
@@ -233,17 +238,34 @@ def main():
             st.write("### Hardware Testing")
             st.write("Test hardware components before starting a session:")
             
-            # Odor valve test buttons
-            st.write("**Odor Valves:**")
-            col_odor1, col_odor2 = st.columns(2)
-            with col_odor1:
-                if st.button("Test Odor 1"):
-                    if st.session_state.arduino.send_command("TEST_ODOR1"):
-                        st.success("Odor 1 valve activated for 1 second")
-            with col_odor2:
-                if st.button("Test Odor 2"):
-                    if st.session_state.arduino.send_command("TEST_ODOR2"):
-                        st.success("Odor 2 valve activated for 1 second")
+            # Odor valve test button
+            st.write("**Odor Valve:**")
+            if st.button("Test Odor Valve"):
+                if st.session_state.arduino.send_command("TEST_ODOR"):
+                    st.success("Odor valve activated for 2 seconds")
+            
+            # Manual odor control
+            st.write("Direct Odor Control:")
+            
+            # Manual Odor control
+            col_odor_on, col_odor_off = st.columns(2)
+            with col_odor_on:
+                if not hasattr(st.session_state, 'manual_odor_active') or not st.session_state.manual_odor_active:
+                    if st.button("Odor ON", type="primary"):
+                        if st.session_state.arduino.send_command("MANUAL_ODOR_ON"):
+                            st.session_state.manual_odor_active = True
+                            st.rerun()
+            
+            with col_odor_off:
+                if hasattr(st.session_state, 'manual_odor_active') and st.session_state.manual_odor_active:
+                    if st.button("Odor OFF", type="primary"):
+                        if st.session_state.arduino.send_command("MANUAL_ODOR_OFF"):
+                            st.session_state.manual_odor_active = False
+                            st.rerun()
+            
+            # Warning if manual odor is active
+            if hasattr(st.session_state, 'manual_odor_active') and st.session_state.manual_odor_active:
+                st.warning("⚠️ Odor valve is currently ON. Click 'Odor OFF' to deactivate.")
             
             # Reward control
             st.write("**Reward Solenoid:**")
@@ -309,16 +331,23 @@ def main():
         # Experiment settings
         st.write("### Experiment Settings")
         
-        # Timing parameters
-        iti_duration = st.slider("Inter-trial Interval (ms)", 1000, 10000, 5000, step=500)
-        odor_duration = st.slider("Odor Duration (ms)", 500, 5000, 2000, step=100)
-        reward_duration = st.slider("Reward Duration (ms)", 50, 1000, 500, step=50)
+        # Animal ID field
+        animal_id = st.text_input("Animal ID", value="mouse1")
+        if not animal_id:
+            st.warning("Please enter an Animal ID")
         
-        # Apply timing button
-        if st.button("Apply Timing"):
-            command = f"SET_TIMING:{iti_duration},{odor_duration},{reward_duration}"
+        # Timing parameters - only ITI is configurable now
+        iti_duration = st.slider("Inter-trial Interval (ms)", 1000, 10000, 5000, step=500)
+        
+        # Information about hardcoded timing
+        st.info("⚠️ Odor duration (2000ms) and reward pattern (40ms-140ms-40ms) are now hardcoded in the Arduino firmware for precise timing control.")
+        
+        # Apply timing button - only sends ITI now
+        if st.button("Apply ITI Duration"):
+            # Keep the same command format, but use hardcoded values for odor and reward
+            command = f"SET_TIMING:{iti_duration},2000,500"
             if st.session_state.arduino.send_command(command):
-                st.success(f"Timing settings sent: ITI={iti_duration}ms, Odor={odor_duration}ms, Reward={reward_duration}ms")
+                st.success(f"ITI timing set: {iti_duration}ms")
         
         # Trial sequence
         st.write("### Trial Sequence")
@@ -363,6 +392,8 @@ def main():
                 with col_start:
                     start_disabled = st.session_state.manual_reward_active
                     if st.button("Start Session", disabled=start_disabled):
+                        # Store animal ID in session state for later use when saving
+                        st.session_state.animal_id = animal_id
                         st.session_state.arduino.send_command("START")
                         st.session_state.session_running = True
                         st.session_state.start_time = time.time()
@@ -405,96 +436,27 @@ def main():
         
         # Export data
         if not st.session_state.data.empty:
+            date_str = datetime.now().strftime('%Y%m%d')
+            filename = f"{date_str}_{animal_id}_pavlovian.csv"
             st.download_button(
                 "Download Data (CSV)",
                 st.session_state.data.to_csv(index=False).encode('utf-8'),
-                f"pavlovian_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                filename,
                 "text/csv"
             )
     
     with col2:
         st.subheader("Data Visualization")
         
-        # Create tabs for different visualizations
-        tab1, tab2, tab3 = st.tabs(["Raster Plot", "Cumulative Events", "Event Log"])
+        # Create tabs for visualization options
+        tab_realtime, tab_basic = st.tabs(["Enhanced Real-time View", "Basic Event Log"])
         
-        with tab1:
-            # Raster plot
-            fig1 = go.Figure()
-            
-            if not st.session_state.data.empty:
-                # Group data by event type for raster plot
-                for event_code, event_name in EVENT_NAMES.items():
-                    event_data = st.session_state.data[st.session_state.data['event_code'] == event_code]
-                    if not event_data.empty:
-                        # Customize marker appearance based on event type
-                        marker_size = 8
-                        marker_symbol = 'circle'
-                        
-                        if event_code == 1:  # Trial Start
-                            marker_symbol = 'triangle-right'
-                            marker_size = 10
-                        elif event_code == 2:  # Trial End
-                            marker_symbol = 'triangle-left'
-                            marker_size = 10
-                        elif event_code == 3:  # Odor On
-                            marker_symbol = 'square'
-                            marker_size = 10
-                        elif event_code == 5:  # Reward On
-                            marker_symbol = 'star'
-                            marker_size = 12
-                        elif event_code == 7:  # Lick
-                            marker_size = 6
-                        
-                        fig1.add_trace(go.Scatter(
-                            x=event_data['timestamp'],
-                            y=event_data['trial_number'],
-                            mode='markers',
-                            name=event_name,
-                            marker=dict(
-                                size=marker_size,
-                                symbol=marker_symbol
-                            )
-                        ))
-            
-            fig1.update_layout(
-                xaxis_title="Time (s)",
-                yaxis_title="Trial Number",
-                height=500
-            )
-            
-            st.plotly_chart(fig1, use_container_width=True)
+        with tab_realtime:
+            # Use the new real-time dashboard from the imported module
+            create_real_time_dashboard(st.session_state.data, st.session_state.session_running)
         
-        with tab2:
-            # Cumulative events plot
-            fig2 = go.Figure()
-            
-            if not st.session_state.data.empty:
-                # Plot cumulative events by type
-                for event_code, event_name in EVENT_NAMES.items():
-                    event_data = st.session_state.data[st.session_state.data['event_code'] == event_code]
-                    if not event_data.empty:
-                        # Create cumulative count
-                        event_data = event_data.sort_values('timestamp')
-                        event_data['cumulative'] = range(1, len(event_data) + 1)
-                        
-                        fig2.add_trace(go.Scatter(
-                            x=event_data['timestamp'],
-                            y=event_data['cumulative'],
-                            mode='lines',
-                            name=event_name
-                        ))
-            
-            fig2.update_layout(
-                xaxis_title="Time (s)",
-                yaxis_title="Cumulative Count",
-                height=500
-            )
-            
-            st.plotly_chart(fig2, use_container_width=True)
-        
-        with tab3:
-            # Event log as a table
+        with tab_basic:
+            # Simple event log as a table
             if not st.session_state.data.empty:
                 display_df = st.session_state.data[['event_name', 'timestamp', 'trial_number']].copy()
                 display_df['timestamp'] = display_df['timestamp'].round(3)
@@ -562,19 +524,39 @@ def main():
                 except:
                     pass
             
-            # Check reward state
+            # Check hardware states
             if "Reward:ON" in message:
                 st.session_state.manual_reward_active = True
             elif "Reward:OFF" in message:
                 st.session_state.manual_reward_active = False
                 
+            if "Odor:ON" in message:
+                st.session_state.manual_odor_active = True
+            elif "Odor:OFF" in message:
+                st.session_state.manual_odor_active = False
+                
             return
         
-        # Manual reward control messages
+        # Manual control messages
         if message.startswith("MANUAL_REWARD:"):
             if message.endswith("ON"):
                 st.session_state.manual_reward_active = True
             elif message.endswith("OFF"):
+                st.session_state.manual_reward_active = False
+            return
+            
+        if message.startswith("MANUAL_ODOR:"):
+            if message.endswith("ON"):
+                st.session_state.manual_odor_active = True
+            elif message.endswith("OFF"):
+                st.session_state.manual_odor_active = False
+            return
+            
+        # Safety messages
+        if message.startswith("SAFETY:"):
+            if message == "SAFETY:ODOR_OFF":
+                st.session_state.manual_odor_active = False
+            elif message == "SAFETY:REWARD_OFF":
                 st.session_state.manual_reward_active = False
             return
             
@@ -587,17 +569,17 @@ def main():
             st.session_state.lick_count = 0
             return
             
-        # Only update status if it's one of these important messages
-        important_messages = ["SESSION_STARTED", "SESSION_COMPLETE", "SESSION_ABORTED", 
-                              "READY", "SEQUENCE_RECEIVED", "TIMING_SET"]
-        
-        # Handle test messages
-        if any(message.startswith(prefix) for prefix in ["TEST_ODOR", "TEST_REWARD"]):
+        # Test messages
+        if message.startswith("TEST_ODOR") or message.startswith("TEST_REWARD"):
             if message.endswith("_COMPLETE"):
                 st.session_state.status = "Test completed"
             elif message.endswith("_START"):
                 st.session_state.status = "Test in progress"
             return
+        
+        # Only update status if it's one of these important messages
+        important_messages = ["SESSION_STARTED", "SESSION_COMPLETE", "SESSION_ABORTED", 
+                              "READY", "SEQUENCE_RECEIVED", "TIMING_SET"]
         
         if message in important_messages or any(message.startswith(prefix) for prefix in ["SEQUENCE_RECEIVED:", "TIMING_SET:"]):
             if message == "SESSION_STARTED":
@@ -605,11 +587,37 @@ def main():
                 st.session_state.session_running = True
                 st.session_state.start_time = time.time()
             elif message == "SESSION_COMPLETE":
-                st.session_state.status = "Session completed"
+                # Session completed successfully - auto-save data
                 st.session_state.session_running = False
+                
+                # Only save if there's data to save
+                if not st.session_state.data.empty:
+                    # Use the new naming convention: date_AnimalID_pavlovian.csv
+                    date_str = datetime.now().strftime('%Y%m%d')
+                    animal_id = st.session_state.get('animal_id', 'unknown')
+                    filename = f"{date_str}_{animal_id}_pavlovian.csv"
+                    
+                    # Save data to file
+                    st.session_state.data.to_csv(filename, index=False)
+                    st.session_state.status = f"Session completed. Data saved to {filename}"
+                else:
+                    st.session_state.status = "Session completed. No data to save."
+                
+                # Ensure all monitoring is stopped
+                st.session_state.lick_test_active = False
+                st.session_state.manual_reward_active = False
+                st.session_state.manual_odor_active = False
+                
             elif message == "SESSION_ABORTED":
-                st.session_state.status = "Session aborted"
+                # Session aborted - don't auto-save data
                 st.session_state.session_running = False
+                st.session_state.status = "Session aborted. Data not automatically saved."
+                
+                # Ensure all monitoring is stopped
+                st.session_state.lick_test_active = False
+                st.session_state.manual_reward_active = False
+                st.session_state.manual_odor_active = False
+                
             elif message == "READY":
                 st.session_state.status = "Arduino ready"
             elif message.startswith("SEQUENCE_RECEIVED"):

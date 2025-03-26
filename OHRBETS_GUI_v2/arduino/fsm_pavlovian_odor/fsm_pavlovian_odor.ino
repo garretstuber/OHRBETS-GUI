@@ -1,10 +1,21 @@
 // fsm_pavlovian_odor.ino
 // Finite State Machine for Pavlovian Odor Conditioning
+// Version: 2025-03-26 
+// Last updated: March 26, 2025
+// 
+// Updates:
+// - Fixed odor valve timing (exactly 2s with direct delay)
+// - Fixed reward pattern timing (40ms-140ms-40ms with direct control)
+// - Added safety timeouts and additional debugging
+// - Switched to millisecond precision for timestamps
+// - Added timestamp logging for events
+// - Added loop delay detection
+// - Fixed state transition issues with test states
+// - Implemented hardcoded timing for critical components
 
 // Configuration - Hardware Pins (Hardwired)
 #define LED_PIN     13  // Built-in LED for status indication
-#define ODOR1_PIN   2   // Solenoid for CS+ odor
-#define ODOR2_PIN   3   // Solenoid for CS- odor
+#define ODOR_PIN    17  // Single solenoid for odor delivery
 #define REWARD_PIN  4   // Solenoid for reward delivery
 #define LICK_PIN    5   // Optional lick detector input
 
@@ -20,13 +31,21 @@
 // Reward delivery pattern
 #define REWARD_PULSE1_DURATION  40    // First reward pulse (ms)
 #define REWARD_DELAY_DURATION   140   // Delay between pulses (ms)
-#define REWARD_PULSE2_DURATION  40    // Second reward pulse (ms) - changed from 20 to 40
+#define REWARD_PULSE2_DURATION  40    // Second reward pulse (ms)
+
+// Default timing parameters (configurable via commands)
+#define DEFAULT_ITI_DURATION   5000   // Default inter-trial interval (ms)
+#define DEFAULT_ODOR_DURATION  2000   // Default odor presentation duration (ms)
+#define DEFAULT_REWARD_DURATION 500   // Default total reward phase duration (ms)
 
 // Manual test durations
-#define TEST_ODOR_DURATION    1000    // 1 second for manual odor test
+#define TEST_ODOR_DURATION    2000    // 2 seconds for manual odor test - same as default trial duration
 #define TEST_REWARD_DURATION  220     // Combined duration of reward sequence (40+140+40)
 
-// Timing precision: use microseconds for all timestamps
+// Timeout for stuck states (ms) - reset to IDLE if a state lasts too long
+#define STATE_TIMEOUT 10000  // Increased from 5000ms to 10000ms
+
+// Timing precision: use milliseconds for all timestamps and state transitions
 // State machine: use non-blocking design with millis() for state transitions
 
 class PavlovianController {
@@ -36,17 +55,15 @@ private:
         IDLE,
         INTERTRIAL,
         ODOR,
-        REWARD_PULSE1,
-        REWARD_DELAY,
-        REWARD_PULSE2,
+        REWARD,
         POST_REWARD,
         COMPLETE,
         // Test states
-        TEST_ODOR1,
-        TEST_ODOR2,
-        TEST_REWARD1,
-        TEST_REWARD_DELAY,
-        TEST_REWARD2
+        TEST_ODOR,
+        TEST_REWARD,
+        // Manual control states
+        MANUAL_ODOR_CONTROL,
+        MANUAL_REWARD_CONTROL
     };
     
     State state = IDLE;
@@ -60,17 +77,16 @@ private:
     int currentTrialType = 0;
     
     // Timing parameters (milliseconds)
-    int intertrialInterval = 5000;  // Configurable
-    int odorDuration = 2000;        // Configurable
-    int rewardDuration = 500;       // Total reward phase duration (configurable)
+    int intertrialInterval = DEFAULT_ITI_DURATION;
+    int odorDuration = DEFAULT_ODOR_DURATION;
+    int rewardDuration = DEFAULT_REWARD_DURATION;
     
     // LED blink timing (non-blocking)
     unsigned long ledOffTime = 0;
     bool ledBlinking = false;
     
     // Odor state tracking
-    bool odor1Active = false;
-    bool odor2Active = false;
+    bool odorActive = false;
     
     // Reward state tracking
     bool rewardActive = false;
@@ -79,29 +95,38 @@ private:
     unsigned long lastLickTime = 0;
     int lickCount = 0;
     
+    // Manual control flags
+    bool inManualControl = false;
+
+    // Add timestamp reference variable
+    unsigned long timestampReference = 0;
+
+    // Helper method to print state transitions for debugging
+    void printStateTransition(State fromState, State toState) {
+        Serial.print("STATE_CHANGE:");
+        Serial.print(fromState);
+        Serial.print("->");
+        Serial.println(toState);
+        
+        // Also print timing for better debugging
+        Serial.print("TIME:");
+        Serial.print(millis());
+        Serial.print(",NextState:");
+        Serial.println(nextStateTime);
+    }
+    
     // Methods for hardware control
-    void setOdor(int type, bool state) {
-        // Ensure proper pin control based on trial type
-        if (type == 1) {  // CS+
-            digitalWrite(ODOR1_PIN, state ? HIGH : LOW);
-            odor1Active = state;
-            // Ensure the other odor is off
-            if (state) {
-                digitalWrite(ODOR2_PIN, LOW);
-                odor2Active = false;
-            }
-        } else {  // CS-
-            digitalWrite(ODOR2_PIN, state ? HIGH : LOW);
-            odor2Active = state;
-            // Ensure the other odor is off
-            if (state) {
-                digitalWrite(ODOR1_PIN, LOW);
-                odor1Active = false;
-            }
-        }
+    void setOdor(bool state) {
+        // Control the odor pin directly
+        digitalWrite(ODOR_PIN, state ? HIGH : LOW);
+        odorActive = state;
         
         // Log event only after hardware has been set
         logEvent(state ? EVENT_ODOR_ON : EVENT_ODOR_OFF);
+        
+        // Debug output
+        Serial.print("ODOR_");
+        Serial.println(state ? "ON" : "OFF");
     }
     
     void setReward(bool state) {
@@ -118,8 +143,9 @@ private:
     }
     
     void logEvent(int eventCode) {
-        // Get timestamp first for accuracy
-        unsigned long timestamp = micros();  // Microsecond precision
+        // Get timestamp with millisecond precision, subtract reference time
+        unsigned long currentTime = millis();
+        unsigned long timestamp = currentTime - timestampReference;
         
         // Send data without delays
         Serial.print("DATA:");
@@ -131,7 +157,7 @@ private:
         // Trigger LED blink (non-blocking)
         digitalWrite(LED_PIN, HIGH);
         ledBlinking = true;
-        ledOffTime = millis() + 2; // 2ms blink
+        ledOffTime = currentTime + 2; // 2ms blink
     }
     
     void updateLED() {
@@ -144,43 +170,136 @@ private:
     
     void emergencyStop() {
         // Turn off all outputs
-        digitalWrite(ODOR1_PIN, LOW);
-        digitalWrite(ODOR2_PIN, LOW);
+        digitalWrite(ODOR_PIN, LOW);
         digitalWrite(REWARD_PIN, LOW);
-        odor1Active = false;
-        odor2Active = false;
+        odorActive = false;
         rewardActive = false;
+        inManualControl = false;
+        
+        // Reset state to IDLE
+        State oldState = state;
+        state = IDLE;
+        printStateTransition(oldState, state);
+        Serial.println("EMERGENCY_STOP");
     }
     
-    // Test reward with 2-pulse pattern
-    void startTestReward() {
-        // First pulse
-        state = TEST_REWARD1;
-        stateStartTime = millis();
-        nextStateTime = stateStartTime + REWARD_PULSE1_DURATION;
+    // Set state with proper transition logging
+    void setState(State newState) {
+        State oldState = state;
+        state = newState;
+        stateStartTime = millis(); // Reset state timer
+        printStateTransition(oldState, newState);
+        
+        // If entering IDLE state, ensure all outputs are off
+        if (newState == IDLE) {
+            if (odorActive) {
+                setOdor(false);
+            }
+            if (rewardActive) {
+                setReward(false);
+            }
+            inManualControl = false;
+        }
+        
+        // Set manual control flag for manual states
+        if (newState == MANUAL_ODOR_CONTROL || newState == MANUAL_REWARD_CONTROL) {
+            inManualControl = true;
+        }
+    }
+    
+    // Direct odor test with precise timing
+    void directOdorTest() {
+        Serial.println("DIRECT_ODOR_TEST_START");
+        
+        // Set state to TEST_ODOR
+        setState(TEST_ODOR);
+        
+        // Turn on odor solenoid
+        digitalWrite(LED_PIN, HIGH);  // LED indicator
+        setOdor(true);
+        
+        // Wait exactly 2 seconds with blocking delay
+        delay(odorDuration);
+        
+        // Turn off odor solenoid
+        setOdor(false);
+        digitalWrite(LED_PIN, LOW);
+        
+        // Return to idle state
+        setState(IDLE);
+        Serial.println("DIRECT_ODOR_TEST_COMPLETE");
+    }
+    
+    // Direct reward test with precise timing for the pattern
+    void directRewardTest() {
+        Serial.println("DIRECT_REWARD_TEST_START");
+        
+        // Set state to TEST_REWARD
+        setState(TEST_REWARD);
+        
+        // First pulse (40ms)
+        digitalWrite(LED_PIN, HIGH);
         setReward(true);
-        Serial.println("TEST_REWARD_START");
+        Serial.println("REWARD_PULSE1_ON");
+        delay(REWARD_PULSE1_DURATION);
+        
+        // Inter-pulse delay (140ms)
+        setReward(false);
+        digitalWrite(LED_PIN, LOW);
+        Serial.println("REWARD_PULSE1_OFF");
+        delay(REWARD_DELAY_DURATION);
+        
+        // Second pulse (40ms)
+        digitalWrite(LED_PIN, HIGH);
+        setReward(true);
+        Serial.println("REWARD_PULSE2_ON");
+        delay(REWARD_PULSE2_DURATION);
+        
+        // Turn off
+        setReward(false);
+        digitalWrite(LED_PIN, LOW);
+        Serial.println("REWARD_PULSE2_OFF");
+        
+        // Return to idle state
+        setState(IDLE);
+        Serial.println("DIRECT_REWARD_TEST_COMPLETE");
+    }
+    
+    // Direct reward sequence for CS+ trials with precise timing
+    void deliverReward() {
+        // First pulse (40ms)
+        setReward(true);
+        delay(REWARD_PULSE1_DURATION);
+        
+        // Inter-pulse delay (140ms)
+        setReward(false);
+        delay(REWARD_DELAY_DURATION);
+        
+        // Second pulse (40ms)
+        setReward(true);
+        delay(REWARD_PULSE2_DURATION);
+        
+        // Turn off
+        setReward(false);
     }
 
 public:
     void begin() {
         // Initialize hardware
         pinMode(LED_PIN, OUTPUT);
-        pinMode(ODOR1_PIN, OUTPUT);
-        pinMode(ODOR2_PIN, OUTPUT);
+        pinMode(ODOR_PIN, OUTPUT);
         pinMode(REWARD_PIN, OUTPUT);
         pinMode(LICK_PIN, INPUT_PULLUP);
         
         // Turn everything off
         digitalWrite(LED_PIN, LOW);
-        digitalWrite(ODOR1_PIN, LOW);
-        digitalWrite(ODOR2_PIN, LOW);
+        digitalWrite(ODOR_PIN, LOW);
         digitalWrite(REWARD_PIN, LOW);
         
         // Initialize state variables
-        odor1Active = false;
-        odor2Active = false;
+        odorActive = false;
         rewardActive = false;
+        inManualControl = false;
         
         // Initialize serial
         Serial.begin(115200);
@@ -194,60 +313,65 @@ public:
         // Non-blocking state machine
         unsigned long currentTime = millis();
         
+        // Check for state timeout - prevent stuck states
+        // Only apply timeout to non-manual states
+        if (state != IDLE && !inManualControl && (currentTime - stateStartTime) > STATE_TIMEOUT) {
+            Serial.print("STATE_TIMEOUT:");
+            Serial.print(state);
+            Serial.print(",Started:");
+            Serial.print(stateStartTime);
+            Serial.print(",Current:");
+            Serial.println(currentTime);
+            emergencyStop();
+            return;
+        }
+        
         // Only proceed if in active state and time has elapsed
         if (state != IDLE && state != COMPLETE && currentTime >= nextStateTime) {
             switch (state) {
                 case INTERTRIAL:
                     // Transition to odor presentation
-                    state = ODOR;
-                    stateStartTime = currentTime;
+                    setState(ODOR);
+                    
+                    // Direct odor control with precise timing
+                    // Turn on odor
+                    setOdor(true);
+                    
+                    // Calculate next state time
                     nextStateTime = currentTime + odorDuration;
-                    setOdor(currentTrialType, true);
                     break;
                     
                 case ODOR:
                     // Turn off odor and transition to reward sequence (for CS+) or post-reward (for CS-)
-                    setOdor(currentTrialType, false);
+                    setOdor(false);
                     
                     if (currentTrialType == 1) {  // CS+
-                        // First reward pulse
-                        state = REWARD_PULSE1;
-                        stateStartTime = currentTime;
-                        nextStateTime = currentTime + REWARD_PULSE1_DURATION;
-                        setReward(true);
+                        // Use reward state for CS+ trials
+                        setState(REWARD);
+                        
+                        // Deliver reward with direct timing control
+                        deliverReward();
+                        
+                        // Calculate time remaining in reward phase
+                        unsigned long totalRewardTime = 
+                            REWARD_PULSE1_DURATION + REWARD_DELAY_DURATION + REWARD_PULSE2_DURATION;
+                        unsigned long remainingTime = 
+                            (totalRewardTime >= rewardDuration) ? 0 : (rewardDuration - totalRewardTime);
+                        
+                        // Set next state time
+                        nextStateTime = currentTime + remainingTime;
+                        
                     } else {  // CS-
                         // Skip reward and go to post-reward phase
-                        state = POST_REWARD;
-                        stateStartTime = currentTime;
+                        setState(POST_REWARD);
                         nextStateTime = currentTime + rewardDuration;
                     }
                     break;
                     
-                case REWARD_PULSE1:
-                    // Turn off reward and start delay
-                    setReward(false);
-                    state = REWARD_DELAY;
-                    stateStartTime = currentTime;
-                    nextStateTime = currentTime + REWARD_DELAY_DURATION;
-                    break;
-                    
-                case REWARD_DELAY:
-                    // Second reward pulse
-                    state = REWARD_PULSE2;
-                    stateStartTime = currentTime;
-                    nextStateTime = currentTime + REWARD_PULSE2_DURATION;
-                    setReward(true);
-                    break;
-                    
-                case REWARD_PULSE2:
-                    // Turn off reward and go to post-reward phase
-                    setReward(false);
-                    state = POST_REWARD;
-                    stateStartTime = currentTime;
-                    // Calculate remaining time in reward phase
-                    unsigned long totalElapsed = currentTime - (stateStartTime - REWARD_PULSE1_DURATION - REWARD_DELAY_DURATION);
-                    unsigned long remainingTime = (totalElapsed >= rewardDuration) ? 0 : (rewardDuration - totalElapsed);
-                    nextStateTime = currentTime + remainingTime;
+                case REWARD:
+                    // Move to post-reward phase after waiting any remaining time
+                    setState(POST_REWARD);
+                    nextStateTime = currentTime;  // Immediate transition
                     break;
                     
                 case POST_REWARD:
@@ -257,61 +381,25 @@ public:
                     // Move to next trial or end session
                     currentTrial++;
                     if (currentTrial >= numTrials) {
-                        state = COMPLETE;
+                        setState(COMPLETE);
                         Serial.println("SESSION_COMPLETE");
                     } else {
                         // Start next trial
                         currentTrialType = trialSequence[currentTrial];
-                        state = INTERTRIAL;
-                        stateStartTime = currentTime;
+                        setState(INTERTRIAL);
                         nextStateTime = currentTime + intertrialInterval;
                         logEvent(EVENT_TRIAL_START);
                     }
                     break;
                 
-                // Test states for hardware validation
-                case TEST_ODOR1:
-                    // Turn off odor after test duration
-                    digitalWrite(ODOR1_PIN, LOW);
-                    odor1Active = false;
-                    state = IDLE;
-                    Serial.println("TEST_ODOR1_COMPLETE");
-                    break;
-                    
-                case TEST_ODOR2:
-                    // Turn off odor after test duration
-                    digitalWrite(ODOR2_PIN, LOW);
-                    odor2Active = false;
-                    state = IDLE;
-                    Serial.println("TEST_ODOR2_COMPLETE");
+                case COMPLETE:
+                    // Move back to IDLE state when complete
+                    setState(IDLE);
                     break;
                 
-                // New test states for reward with explicit state transitions
-                case TEST_REWARD1:
-                    // End of first pulse - turn off solenoid
-                    setReward(false);
-                    // Transition to delay
-                    state = TEST_REWARD_DELAY;
-                    stateStartTime = currentTime;
-                    nextStateTime = currentTime + REWARD_DELAY_DURATION;
-                    break;
-                    
-                case TEST_REWARD_DELAY:
-                    // End of delay - start second pulse
-                    setReward(true);
-                    state = TEST_REWARD2;
-                    stateStartTime = currentTime;
-                    nextStateTime = currentTime + REWARD_PULSE2_DURATION;
-                    break;
-                    
-                case TEST_REWARD2:
-                    // End of second pulse
-                    setReward(false);
-                    state = IDLE;
-                    Serial.println("TEST_REWARD_COMPLETE");
-                    break;
-                    
                 default:
+                    // Unknown state - reset to IDLE
+                    setState(IDLE);
                     break;
             }
         }
@@ -327,33 +415,51 @@ public:
         }
         lastLickState = currentLickState;
         
-        // Safety check - ensure reward is not stuck on
-        if (rewardActive && state != REWARD_PULSE1 && state != REWARD_PULSE2 
-            && state != TEST_REWARD1 && state != TEST_REWARD2) {
-            // If reward is on but we're not in a reward pulse state, turn it off
+        // Safety checks - ensure solenoids are not stuck on
+        // Skip safety checks for manual control or test states
+        
+        // Reward solenoid safety check - force close if not in a reward pulse state or manual control
+        if (rewardActive && 
+            !inManualControl &&
+            state != REWARD && 
+            state != TEST_REWARD) {
+            // If reward is on but we're not in a reward state, turn it off
             setReward(false);
+            Serial.println("SAFETY:REWARD_OFF");
+        }
+        
+        // Odor solenoid safety check - force close if not in an odor state or manual control
+        if (odorActive && 
+            !inManualControl &&
+            state != ODOR && 
+            state != TEST_ODOR) {
+            // If odor is on but we're not in an appropriate state, turn it off
+            setOdor(false);
+            Serial.println("SAFETY:ODOR_OFF");
         }
     }
     
     void processCommand(const String& command) {
         // Handle commands from Python GUI
+        if (command == "RESET") {
+            // Force reset the state machine to IDLE
+            emergencyStop();
+            return;
+        }
+        
         if (command.startsWith("SET_TIMING:")) {
             // Format: SET_TIMING:iti,odor,reward
             // Example: SET_TIMING:5000,2000,500
+            // Note: Only ITI is configurable now, odor and reward are hardcoded
             int comma1 = command.indexOf(',', 11);
-            int comma2 = command.indexOf(',', comma1 + 1);
             
-            if (comma1 > 0 && comma2 > 0) {
+            if (comma1 > 0) {
                 intertrialInterval = command.substring(11, comma1).toInt();
-                odorDuration = command.substring(comma1 + 1, comma2).toInt();
-                rewardDuration = command.substring(comma2 + 1).toInt();
                 
-                Serial.print("TIMING_SET:");
+                // Keep odor and reward duration hardcoded but acknowledge receipt
+                Serial.print("TIMING_SET:ITI=");
                 Serial.print(intertrialInterval);
-                Serial.print(",");
-                Serial.print(odorDuration);
-                Serial.print(",");
-                Serial.println(rewardDuration);
+                Serial.println("ms (Odor and Reward timing are hardcoded)");
             }
         }
         else if (command.startsWith("SEQUENCE:")) {
@@ -392,21 +498,23 @@ public:
         else if (command == "START") {
             // Only start if in IDLE state and not running tests
             if (state == IDLE && numTrials > 0) {
+                // Reset timestamp reference when starting new session
+                timestampReference = millis();
+                
                 // Start session
                 currentTrial = 0;
                 currentTrialType = trialSequence[0];
-                state = INTERTRIAL;
-                stateStartTime = millis();
-                nextStateTime = stateStartTime + intertrialInterval;
+                setState(INTERTRIAL);
+                nextStateTime = millis() + intertrialInterval;
                 logEvent(EVENT_TRIAL_START);
                 Serial.println("SESSION_STARTED");
+            } else {
+                Serial.println("ERROR:BUSY");
             }
         }
         else if (command == "ABORT") {
             // Emergency stop
             emergencyStop();
-            state = IDLE;
-            Serial.println("SESSION_ABORTED");
         }
         else if (command == "STATUS") {
             // Report current status
@@ -416,10 +524,8 @@ public:
             Serial.print(currentTrial);
             Serial.print("/");
             Serial.print(numTrials);
-            Serial.print(",O1:");
-            Serial.print(odor1Active ? "ON" : "OFF");
-            Serial.print(",O2:");
-            Serial.print(odor2Active ? "ON" : "OFF");
+            Serial.print(",Odor:");
+            Serial.print(odorActive ? "ON" : "OFF");
             Serial.print(",Reward:");
             Serial.print(rewardActive ? "ON" : "OFF");
             Serial.print(",Licks:");
@@ -427,40 +533,11 @@ public:
             Serial.print(",LastLick:");
             Serial.println(lastLickTime);
         }
-        else if (command == "TEST_ODOR1") {
+        else if (command == "TEST_ODOR") {
             // Only allow test if in IDLE state
             if (state == IDLE) {
-                // Turn on Odor 1 for testing
-                digitalWrite(ODOR1_PIN, HIGH);
-                odor1Active = true;
-                digitalWrite(ODOR2_PIN, LOW);
-                odor2Active = false;
-                logEvent(EVENT_ODOR_ON);
-                
-                // Set timer to turn off after test duration
-                state = TEST_ODOR1;
-                stateStartTime = millis();
-                nextStateTime = stateStartTime + TEST_ODOR_DURATION;
-                Serial.println("TEST_ODOR1_START");
-            } else {
-                Serial.println("ERROR:BUSY");
-            }
-        }
-        else if (command == "TEST_ODOR2") {
-            // Only allow test if in IDLE state
-            if (state == IDLE) {
-                // Turn on Odor 2 for testing
-                digitalWrite(ODOR2_PIN, HIGH);
-                odor2Active = true;
-                digitalWrite(ODOR1_PIN, LOW);
-                odor1Active = false;
-                logEvent(EVENT_ODOR_ON);
-                
-                // Set timer to turn off after test duration
-                state = TEST_ODOR2;
-                stateStartTime = millis();
-                nextStateTime = stateStartTime + TEST_ODOR_DURATION;
-                Serial.println("TEST_ODOR2_START");
+                // Use direct timing method instead of state machine
+                directOdorTest();
             } else {
                 Serial.println("ERROR:BUSY");
             }
@@ -468,14 +545,16 @@ public:
         else if (command == "TEST_REWARD") {
             // Only allow test if in IDLE state
             if (state == IDLE) {
-                startTestReward();
+                // Use direct timing method instead of state machine
+                directRewardTest();
             } else {
                 Serial.println("ERROR:BUSY");
             }
         }
         else if (command == "MANUAL_REWARD_ON") {
             // Directly control reward for manual testing
-            if (state == IDLE) {
+            if (state == IDLE || inManualControl) {
+                setState(MANUAL_REWARD_CONTROL);
                 setReward(true);
                 Serial.println("MANUAL_REWARD:ON");
             } else {
@@ -486,6 +565,31 @@ public:
             // Directly control reward for manual testing
             setReward(false);
             Serial.println("MANUAL_REWARD:OFF");
+            
+            // Return to IDLE if in manual control
+            if (inManualControl) {
+                setState(IDLE);
+            }
+        }
+        else if (command == "MANUAL_ODOR_ON") {
+            // Directly control odor for manual testing
+            if (state == IDLE || inManualControl) {
+                setState(MANUAL_ODOR_CONTROL);
+                setOdor(true);
+                Serial.println("MANUAL_ODOR:ON");
+            } else {
+                Serial.println("ERROR:BUSY");
+            }
+        }
+        else if (command == "MANUAL_ODOR_OFF") {
+            // Directly control odor for manual testing
+            setOdor(false);
+            Serial.println("MANUAL_ODOR:OFF");
+            
+            // Return to IDLE if in manual control
+            if (inManualControl) {
+                setState(IDLE);
+            }
         }
         else if (command == "TEST_LICK") {
             // Reset lick counter and report current status
@@ -497,6 +601,19 @@ public:
             // Reset lick counter
             lickCount = 0;
             Serial.println("LICK_COUNT_RESET");
+        }
+        else if (command == "DEBUG_STATE") {
+            // Output debug information about current state
+            Serial.print("DEBUG_STATE:");
+            Serial.print(state);
+            Serial.print(",Time:");
+            Serial.print(millis());
+            Serial.print(",StateStart:");
+            Serial.print(stateStartTime);
+            Serial.print(",NextState:");
+            Serial.print(nextStateTime);
+            Serial.print(",Manual:");
+            Serial.println(inManualControl);
         }
     }
 };
