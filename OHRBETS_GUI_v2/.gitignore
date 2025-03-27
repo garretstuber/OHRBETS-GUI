@@ -1,0 +1,43 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Testing files
+pin_test/
+test_*.ino
+*_test.ino
+
+# Data files
+*.csv
+data/
+
+# Duplicate files
+fsm_pavlov.ino
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Editor specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Temporary files
+*~
+*.bak
+*.tmp 
