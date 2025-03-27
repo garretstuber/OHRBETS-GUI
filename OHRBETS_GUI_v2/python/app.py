@@ -144,7 +144,8 @@ def main():
         layout="wide",
     )
     
-    st.title("Pavlovian Odor Conditioning")
+    st.title("🐭 Pavlovian Odor Conditioning 🍬")
+    st.markdown("### Stuber Lab - UW")
     
     # Initialize session state for data
     if 'arduino' not in st.session_state:
@@ -335,19 +336,49 @@ def main():
         animal_id = st.text_input("Animal ID", value="mouse1")
         if not animal_id:
             st.warning("Please enter an Animal ID")
+            
+        # Add condition fields
+        st.write("### Animal Condition")
+        condition = st.selectbox(
+            "Experimental Condition",
+            ["ad lib.", "food restricted", "water restricted"]
+        )
         
-        # Timing parameters - only ITI is configurable now
-        iti_duration = st.slider("Inter-trial Interval (ms)", 1000, 10000, 5000, step=500)
+        # Add treatment field
+        treatment = st.text_input("Treatment (e.g., drug dose, injection, etc.)", value="")
+        if treatment:
+            st.info(f"Current treatment: {treatment}")
+        
+        # Add restriction metadata
+        if condition != "ad lib.":
+            restriction_start = st.date_input("Restriction Start Date")
+            current_weight = st.number_input("Current Weight (g)", min_value=0.0, max_value=100.0, value=20.0, step=0.1)
+            baseline_weight = st.number_input("Baseline Weight (g)", min_value=0.0, max_value=100.0, value=25.0, step=0.1)
+            if baseline_weight > 0:
+                weight_percent = (current_weight / baseline_weight) * 100
+                st.write(f"Current weight is {weight_percent:.1f}% of baseline")
+        
+        # Timing parameters - ITI range with random sampling
+        st.write("### ITI Settings")
+        col_iti_min, col_iti_max = st.columns(2)
+        with col_iti_min:
+            iti_min = st.number_input("Minimum ITI (s)", min_value=1, max_value=30, value=5, step=1)
+        with col_iti_max:
+            iti_max = st.number_input("Maximum ITI (s)", min_value=iti_min, max_value=30, value=10, step=1)
+            
+        st.info(f"ITI will be randomly sampled between {iti_min}-{iti_max} seconds in 1s intervals")
+        
+        # When sending timing command, convert to milliseconds
+        if st.button("Apply ITI Settings"):
+            # Convert to milliseconds for Arduino
+            iti_min_ms = iti_min * 1000
+            iti_max_ms = iti_max * 1000
+            command = f"SET_ITI_RANGE:{iti_min_ms},{iti_max_ms}"
+            if st.session_state.arduino.send_command(command):
+                st.success(f"ITI range set: {iti_min}-{iti_max} seconds")
         
         # Information about hardcoded timing
         st.info("⚠️ Odor duration (2000ms) and reward pattern (40ms-140ms-40ms) are now hardcoded in the Arduino firmware for precise timing control.")
-        
-        # Apply timing button - only sends ITI now
-        if st.button("Apply ITI Duration"):
-            # Keep the same command format, but use hardcoded values for odor and reward
-            command = f"SET_TIMING:{iti_duration},2000,500"
-            if st.session_state.arduino.send_command(command):
-                st.success(f"ITI timing set: {iti_duration}ms")
         
         # Trial sequence
         st.write("### Trial Sequence")
@@ -446,27 +477,117 @@ def main():
             )
     
     with col2:
-        st.subheader("Data Visualization")
+        st.subheader("Session Metrics")
         
-        # Create tabs for visualization options
-        tab_realtime, tab_basic = st.tabs(["Enhanced Real-time View", "Basic Event Log"])
+        # Create a metrics dashboard
+        if st.session_state.session_running:
+            # Calculate core metrics
+            total_licks = len(st.session_state.data[st.session_state.data['event_code'] == 7])
+            cs_plus_trials = len(st.session_state.data[
+                (st.session_state.data['event_code'] == 1) & 
+                (st.session_state.data['trial_type'] == 1)
+            ])
+            cs_minus_trials = len(st.session_state.data[
+                (st.session_state.data['event_code'] == 1) & 
+                (st.session_state.data['trial_type'] == 2)
+            ])
+            
+            # Session timing
+            elapsed = time.time() - st.session_state.start_time
+            minutes = int(elapsed // 60)
+            seconds = int(elapsed % 60)
+            
+            # Estimate time remaining based on trial sequence
+            if 'sequence' in st.session_state:
+                total_trials = len(st.session_state.sequence.split(','))
+                completed_trials = cs_plus_trials + cs_minus_trials
+                if completed_trials > 0:
+                    avg_trial_time = elapsed / completed_trials
+                    remaining_trials = total_trials - completed_trials
+                    time_remaining = remaining_trials * avg_trial_time
+                    rem_minutes = int(time_remaining // 60)
+                    rem_seconds = int(time_remaining % 60)
+                else:
+                    rem_minutes = 0
+                    rem_seconds = 0
+            
+            # Create three columns for metrics display
+            col_timing, col_trials, col_behavior = st.columns(3)
+            
+            with col_timing:
+                st.markdown("### Timing")
+                st.markdown(f"""
+                <div style="background-color:#f0f2f6; padding:10px; border-radius:5px; margin:5px;">
+                    <div><b>Session Time:</b> {minutes:02d}:{seconds:02d}</div>
+                    <div><b>Est. Remaining:</b> {rem_minutes:02d}:{rem_seconds:02d}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col_trials:
+                st.markdown("### Trials")
+                st.markdown(f"""
+                <div style="background-color:#f0f2f6; padding:10px; border-radius:5px; margin:5px;">
+                    <div><b>CS+ Trials:</b> {cs_plus_trials}</div>
+                    <div><b>CS- Trials:</b> {cs_minus_trials}</div>
+                    <div><b>Total Trials:</b> {cs_plus_trials + cs_minus_trials}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col_behavior:
+                st.markdown("### Behavior")
+                # Calculate lick rates
+                if elapsed > 0:
+                    lick_rate = total_licks / (elapsed / 60)  # licks per minute
+                else:
+                    lick_rate = 0
+                
+                # Calculate CS+ vs CS- licking
+                cs_plus_licks = 0
+                cs_minus_licks = 0
+                for trial_num in st.session_state.data[st.session_state.data['trial_type'] == 1]['trial_number'].unique():
+                    trial_licks = len(st.session_state.data[
+                        (st.session_state.data['event_code'] == 7) & 
+                        (st.session_state.data['trial_number'] == trial_num)
+                    ])
+                    cs_plus_licks += trial_licks
+                
+                for trial_num in st.session_state.data[st.session_state.data['trial_type'] == 2]['trial_number'].unique():
+                    trial_licks = len(st.session_state.data[
+                        (st.session_state.data['event_code'] == 7) & 
+                        (st.session_state.data['trial_number'] == trial_num)
+                    ])
+                    cs_minus_licks += trial_licks
+                
+                # Calculate average licks per trial
+                avg_plus_licks = cs_plus_licks / cs_plus_trials if cs_plus_trials > 0 else 0
+                avg_minus_licks = cs_minus_licks / cs_minus_trials if cs_minus_trials > 0 else 0
+                
+                st.markdown(f"""
+                <div style="background-color:#f0f2f6; padding:10px; border-radius:5px; margin:5px;">
+                    <div><b>Total Licks:</b> {total_licks}</div>
+                    <div><b>Lick Rate:</b> {lick_rate:.1f}/min</div>
+                    <div><b>Avg CS+ Licks:</b> {avg_plus_licks:.1f}</div>
+                    <div><b>Avg CS- Licks:</b> {avg_minus_licks:.1f}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Add a simple progress bar
+            progress = (cs_plus_trials + cs_minus_trials) / total_trials if 'sequence' in st.session_state else 0
+            st.progress(progress, text=f"Session Progress: {progress*100:.1f}%")
         
-        with tab_realtime:
-            # Use the new real-time dashboard from the imported module
-            create_real_time_dashboard(st.session_state.data, st.session_state.session_running)
-        
-        with tab_basic:
-            # Simple event log as a table
-            if not st.session_state.data.empty:
-                display_df = st.session_state.data[['event_name', 'timestamp', 'trial_number']].copy()
-                display_df['timestamp'] = display_df['timestamp'].round(3)
-                st.dataframe(
-                    display_df.sort_values('timestamp', ascending=False),
-                    use_container_width=True,
-                    hide_index=True
-                )
-            else:
-                st.info("No events recorded yet")
+        else:
+            st.info("Start a session to see metrics")
+            
+        # Basic event log
+        st.markdown("### Recent Events")
+        if not st.session_state.data.empty:
+            display_df = st.session_state.data[['event_name', 'timestamp', 'trial_number']].copy()
+            display_df['timestamp'] = display_df['timestamp'].round(3)
+            st.dataframe(
+                display_df.sort_values('timestamp', ascending=False).head(10),
+                use_container_width=True,
+                hide_index=True
+            )
 
     # Callback functions for Arduino interface
     def handle_data(event_code, timestamp):
