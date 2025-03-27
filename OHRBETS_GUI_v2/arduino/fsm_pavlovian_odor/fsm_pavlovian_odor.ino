@@ -33,17 +33,23 @@
 #define REWARD_DELAY_DURATION   140   // Delay between pulses (ms)
 #define REWARD_PULSE2_DURATION  40    // Second reward pulse (ms)
 
-// Default timing parameters (configurable via commands)
+// Lick detection parameters
+#define MIN_INTERLICK_INTERVAL  67    // Minimum time between licks (ms) - mice cannot lick faster than ~15 Hz
+
+// Trial timing parameters
 #define DEFAULT_ITI_DURATION   5000   // Default inter-trial interval (ms)
 #define DEFAULT_ODOR_DURATION  2000   // Default odor presentation duration (ms)
 #define DEFAULT_REWARD_DURATION 500   // Default total reward phase duration (ms)
+#define TRIAL_INIT_DURATION    5000   // 5 second wait after trial start
+#define TRACE_INTERVAL_DURATION 1000  // 1 second trace interval
+#define CONSUMATORY_DURATION   5000   // 5 second consumatory period
 
 // Manual test durations
-#define TEST_ODOR_DURATION    2000    // 2 seconds for manual odor test - same as default trial duration
+#define TEST_ODOR_DURATION    2000    // 2 seconds for manual odor test
 #define TEST_REWARD_DURATION  220     // Combined duration of reward sequence (40+140+40)
 
-// Timeout for stuck states (ms) - reset to IDLE if a state lasts too long
-#define STATE_TIMEOUT 10000  // Increased from 5000ms to 10000ms
+// Timeout for stuck states (ms)
+#define STATE_TIMEOUT 10000
 
 // Timing precision: use milliseconds for all timestamps and state transitions
 // State machine: use non-blocking design with millis() for state transitions
@@ -53,11 +59,14 @@ private:
     // State machine states
     enum State {
         IDLE,
-        INTERTRIAL,
-        ODOR,
-        REWARD,
-        POST_REWARD,
-        COMPLETE,
+        ITI,               // 1. ITI period
+        TRIAL_INIT,       // 2. Trial start + 5s wait
+        ODOR_PERIOD,      // 3. 2s odor presentation
+        TRACE_INTERVAL,   // 4. 1s trace interval
+        REWARD_SEQUENCE,  // 5. Reward solenoid pattern
+        CONSUMATORY,      // 6. 5s consumatory period
+        TRIAL_OFF,        // 7. End trial and loop back
+        COMPLETE,         // Session complete
         // Test states
         TEST_ODOR,
         TEST_REWARD,
@@ -314,7 +323,6 @@ public:
         unsigned long currentTime = millis();
         
         // Check for state timeout - prevent stuck states
-        // Only apply timeout to non-manual states
         if (state != IDLE && !inManualControl && (currentTime - stateStartTime) > STATE_TIMEOUT) {
             Serial.print("STATE_TIMEOUT:");
             Serial.print(state);
@@ -329,74 +337,62 @@ public:
         // Only proceed if in active state and time has elapsed
         if (state != IDLE && state != COMPLETE && currentTime >= nextStateTime) {
             switch (state) {
-                case INTERTRIAL:
-                    // Transition to odor presentation
-                    setState(ODOR);
-                    
-                    // Direct odor control with precise timing
-                    // Turn on odor
+                case ITI:
+                    // ITI complete, start new trial sequence
+                    setState(TRIAL_INIT);
+                    logEvent(EVENT_TRIAL_START);
+                    nextStateTime = currentTime + TRIAL_INIT_DURATION;
+                    break;
+
+                case TRIAL_INIT:
+                    // Start odor period
+                    setState(ODOR_PERIOD);
                     setOdor(true);
-                    
-                    // Calculate next state time
-                    nextStateTime = currentTime + odorDuration;
+                    nextStateTime = currentTime + odorDuration;  // 2s odor
                     break;
-                    
-                case ODOR:
-                    // Turn off odor and transition to reward sequence (for CS+) or post-reward (for CS-)
+
+                case ODOR_PERIOD:
+                    // End odor, start trace interval
                     setOdor(false);
-                    
+                    setState(TRACE_INTERVAL);
+                    nextStateTime = currentTime + TRACE_INTERVAL_DURATION;
+                    break;
+
+                case TRACE_INTERVAL:
+                    setState(REWARD_SEQUENCE);
                     if (currentTrialType == 1) {  // CS+
-                        // Use reward state for CS+ trials
-                        setState(REWARD);
-                        
-                        // Deliver reward with direct timing control
-                        deliverReward();
-                        
-                        // Calculate time remaining in reward phase
-                        unsigned long totalRewardTime = 
-                            REWARD_PULSE1_DURATION + REWARD_DELAY_DURATION + REWARD_PULSE2_DURATION;
-                        unsigned long remainingTime = 
-                            (totalRewardTime >= rewardDuration) ? 0 : (rewardDuration - totalRewardTime);
-                        
-                        // Set next state time
-                        nextStateTime = currentTime + remainingTime;
-                        
-                    } else {  // CS-
-                        // Skip reward and go to post-reward phase
-                        setState(POST_REWARD);
-                        nextStateTime = currentTime + rewardDuration;
+                        deliverReward();  // This handles the precise reward pattern timing
                     }
+                    nextStateTime = currentTime + rewardDuration;
                     break;
-                    
-                case REWARD:
-                    // Move to post-reward phase after waiting any remaining time
-                    setState(POST_REWARD);
-                    nextStateTime = currentTime;  // Immediate transition
+
+                case REWARD_SEQUENCE:
+                    setState(CONSUMATORY);
+                    nextStateTime = currentTime + CONSUMATORY_DURATION;
                     break;
-                    
-                case POST_REWARD:
-                    // Log trial end
+
+                case CONSUMATORY:
+                    setState(TRIAL_OFF);
                     logEvent(EVENT_TRIAL_END);
                     
-                    // Move to next trial or end session
+                    // Prepare for next trial
                     currentTrial++;
                     if (currentTrial >= numTrials) {
                         setState(COMPLETE);
                         Serial.println("SESSION_COMPLETE");
                     } else {
-                        // Start next trial
+                        // Get next trial type and generate new ITI
                         currentTrialType = trialSequence[currentTrial];
-                        setState(INTERTRIAL);
+                        setState(ITI);
                         nextStateTime = currentTime + intertrialInterval;
-                        logEvent(EVENT_TRIAL_START);
                     }
                     break;
-                
+
                 case COMPLETE:
                     // Move back to IDLE state when complete
                     setState(IDLE);
                     break;
-                
+
                 default:
                     // Unknown state - reset to IDLE
                     setState(IDLE);
@@ -406,12 +402,24 @@ public:
         
         // Check for lick events if using lick detector
         static bool lastLickState = HIGH;
+        static unsigned long lastLickTime = 0;  // Track time of last lick for debounce
+        
         bool currentLickState = digitalRead(LICK_PIN);
+        
+        // Only register a lick if:
+        // 1. There's a falling edge (transition from HIGH to LOW)
+        // 2. Enough time has passed since the last lick (mice can't lick faster than ~15 Hz)
         if (currentLickState != lastLickState && currentLickState == LOW) {
-            // Lick detected (falling edge)
-            lastLickTime = millis();
-            lickCount++;
-            logEvent(EVENT_LICK);
+            // Check if enough time has passed since the last lick
+            if (currentTime - lastLickTime >= MIN_INTERLICK_INTERVAL) {
+                // Valid lick detected - log it
+                lastLickTime = currentTime;
+                lickCount++;
+                logEvent(EVENT_LICK);
+            } else {
+                // Lick occurred too soon after previous lick - likely sensor noise
+                // Ignore this lick but update state to prevent multiple detections
+            }
         }
         lastLickState = currentLickState;
         
@@ -421,7 +429,7 @@ public:
         // Reward solenoid safety check - force close if not in a reward pulse state or manual control
         if (rewardActive && 
             !inManualControl &&
-            state != REWARD && 
+            state != REWARD_SEQUENCE && 
             state != TEST_REWARD) {
             // If reward is on but we're not in a reward state, turn it off
             setReward(false);
@@ -431,7 +439,7 @@ public:
         // Odor solenoid safety check - force close if not in an odor state or manual control
         if (odorActive && 
             !inManualControl &&
-            state != ODOR && 
+            state != ODOR_PERIOD && 
             state != TEST_ODOR) {
             // If odor is on but we're not in an appropriate state, turn it off
             setOdor(false);
@@ -504,7 +512,7 @@ public:
                 // Start session
                 currentTrial = 0;
                 currentTrialType = trialSequence[0];
-                setState(INTERTRIAL);
+                setState(ITI);
                 nextStateTime = millis() + intertrialInterval;
                 logEvent(EVENT_TRIAL_START);
                 Serial.println("SESSION_STARTED");
