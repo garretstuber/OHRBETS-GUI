@@ -1,7 +1,6 @@
-// fsm_pavlovian_odor.ino
 // Finite State Machine for Pavlovian Odor Conditioning
-// Version: 2025-03-26 
-// Last updated: March 26, 2025
+// Version: 2025-04-01 
+// Last updated: April 2, 2025 at 340pm
 // 
 // Updates:
 // - Fixed odor valve timing (exactly 2s with direct delay)
@@ -12,12 +11,16 @@
 // - Added loop delay detection
 // - Fixed state transition issues with test states
 // - Implemented hardcoded timing for critical components
+// - Integrated MPR121 capacitive touch sensor for lick detection
+
+#include <Wire.h>
+#include "Adafruit_MPR121.h"
 
 // Configuration - Hardware Pins (Hardwired)
 #define LED_PIN     13  // Built-in LED for status indication
 #define ODOR_PIN    17  // Single solenoid for odor delivery
 #define REWARD_PIN  4   // Solenoid for reward delivery
-#define LICK_PIN    5   // Optional lick detector input
+// LICK_PIN removed as we're using MPR121 capacitive sensor
 
 // Event codes for data logging
 #define EVENT_TRIAL_START    1
@@ -27,6 +30,7 @@
 #define EVENT_REWARD_ON      5
 #define EVENT_REWARD_OFF     6
 #define EVENT_LICK           7
+#define EVENT_SESSION_START  8  // New event code for session start
 
 // Reward delivery pattern
 #define REWARD_PULSE1_DURATION  40    // First reward pulse (ms)
@@ -51,6 +55,9 @@
 // Timeout for stuck states (ms)
 #define STATE_TIMEOUT 10000
 
+// Lick detector configuration
+#define LICK_SIGNAL_INVERTED false  // Set to false if lick gives LOW signal
+
 // Timing precision: use milliseconds for all timestamps and state transitions
 // State machine: use non-blocking design with millis() for state transitions
 
@@ -70,6 +77,7 @@ private:
         // Test states
         TEST_ODOR,
         TEST_REWARD,
+        LICK_TEST,        // Added state for lick testing
         // Manual control states
         MANUAL_ODOR_CONTROL,
         MANUAL_REWARD_CONTROL
@@ -78,6 +86,12 @@ private:
     State state = IDLE;
     unsigned long stateStartTime = 0;
     unsigned long nextStateTime = 0;
+    
+    // MPR121 capacitive sensor
+    Adafruit_MPR121 cap;
+    uint16_t lasttouched = 0;
+    uint16_t currtouched = 0;
+    bool lickDetected = false;
     
     // Trial parameters
     int* trialSequence = NULL;
@@ -109,6 +123,9 @@ private:
 
     // Add timestamp reference variable
     unsigned long timestampReference = 0;
+
+    // Pin state tracking
+    bool lastPinState = HIGH;  // Added for lick detection state tracking
 
     // Helper method to print state transitions for debugging
     void printStateTransition(State fromState, State toState) {
@@ -199,7 +216,7 @@ private:
         stateStartTime = millis(); // Reset state timer
         printStateTransition(oldState, newState);
         
-        // If entering IDLE state, ensure all outputs are off
+        // If entering IDLE state, ensure all outputs are off and reset flags
         if (newState == IDLE) {
             if (odorActive) {
                 setOdor(false);
@@ -208,12 +225,25 @@ private:
                 setReward(false);
             }
             inManualControl = false;
+            // Reset lick test state if it was active
+            if (oldState == LICK_TEST) {
+                lickCount = 0;
+                lastLickTime = 0;
+            }
         }
         
         // Set manual control flag for manual states
         if (newState == MANUAL_ODOR_CONTROL || newState == MANUAL_REWARD_CONTROL) {
             inManualControl = true;
         }
+        
+        // Debug output for state change
+        Serial.print("DEBUG:State=");
+        Serial.print(newState);
+        Serial.print(",Manual=");
+        Serial.print(inManualControl);
+        Serial.print(",Time=");
+        Serial.println(millis());
     }
     
     // Direct odor test with precise timing
@@ -276,43 +306,77 @@ private:
     
     // Direct reward sequence for CS+ trials with precise timing
     void deliverReward() {
+        Serial.println("REWARD_DELIVERY_START");
+        
         // First pulse (40ms)
         setReward(true);
+        Serial.println("REWARD_PULSE1_ON");
         delay(REWARD_PULSE1_DURATION);
         
         // Inter-pulse delay (140ms)
         setReward(false);
+        Serial.println("REWARD_PULSE1_OFF");
         delay(REWARD_DELAY_DURATION);
         
         // Second pulse (40ms)
         setReward(true);
+        Serial.println("REWARD_PULSE2_ON");
         delay(REWARD_PULSE2_DURATION);
         
         // Turn off
         setReward(false);
+        Serial.println("REWARD_PULSE2_OFF");
+        
+        Serial.println("REWARD_DELIVERY_COMPLETE");
     }
 
-public:
-    void begin() {
-        // Initialize hardware
+    void initializeHardware() {
+        // Initialize pins
         pinMode(LED_PIN, OUTPUT);
         pinMode(ODOR_PIN, OUTPUT);
         pinMode(REWARD_PIN, OUTPUT);
-        pinMode(LICK_PIN, INPUT_PULLUP);
+        
+        // Initialize MPR121
+        if (!cap.begin(0x5A)) {
+            Serial.println("MPR121 not detected!");
+            while (1); // Halt if sensor not found
+        }
+        cap.setThresholds(9, 4); // Medium sensitivity (was 12,6)
+        delay(50); // Allow sensor to stabilize
         
         // Turn everything off
         digitalWrite(LED_PIN, LOW);
         digitalWrite(ODOR_PIN, LOW);
         digitalWrite(REWARD_PIN, LOW);
         
-        // Initialize state variables
-        odorActive = false;
-        rewardActive = false;
-        inManualControl = false;
-        
-        // Initialize serial
         Serial.begin(115200);
         Serial.println("READY");
+    }
+
+    void checkLicks() {
+        currtouched = cap.touched();
+        
+        // Check for touch onset on first sensor (index 0)
+        if ((currtouched & _BV(0)) && !(lasttouched & _BV(0))) {
+            // Valid lick detected - check timing
+            unsigned long currentTime = millis();
+            if (currentTime - lastLickTime >= MIN_INTERLICK_INTERVAL) {
+                lastLickTime = currentTime;
+                lickCount++;
+                logEvent(EVENT_LICK);
+                
+                // Debug print for lick detection
+                Serial.println("LICK_DETECTED");
+            }
+        }
+        
+        // Save current state for next comparison
+        lasttouched = currtouched;
+    }
+
+public:
+    void begin() {
+        initializeHardware();
     }
     
     void update() {
@@ -321,6 +385,9 @@ public:
         
         // Non-blocking state machine
         unsigned long currentTime = millis();
+        
+        // Check for licks
+        checkLicks();
         
         // Check for state timeout - prevent stuck states
         if (state != IDLE && !inManualControl && (currentTime - stateStartTime) > STATE_TIMEOUT) {
@@ -340,6 +407,7 @@ public:
                 case ITI:
                     // ITI complete, start new trial sequence
                     setState(TRIAL_INIT);
+                    // Log trial start with current trial type
                     logEvent(EVENT_TRIAL_START);
                     nextStateTime = currentTime + TRIAL_INIT_DURATION;
                     break;
@@ -359,6 +427,11 @@ public:
                     break;
 
                 case TRACE_INTERVAL:
+                    Serial.print("DEBUG:Transitioning from TRACE_INTERVAL to REWARD_SEQUENCE, Trial=");
+                    Serial.print(currentTrial);
+                    Serial.print(", Type=");
+                    Serial.println(currentTrialType);
+                    
                     setState(REWARD_SEQUENCE);
                     if (currentTrialType == 1) {  // CS+
                         deliverReward();  // This handles the precise reward pattern timing
@@ -367,22 +440,47 @@ public:
                     break;
 
                 case REWARD_SEQUENCE:
+                    Serial.print("DEBUG:Transitioning from REWARD_SEQUENCE to CONSUMATORY, Trial=");
+                    Serial.print(currentTrial);
+                    Serial.print(", Type=");
+                    Serial.println(currentTrialType);
+                    
                     setState(CONSUMATORY);
                     nextStateTime = currentTime + CONSUMATORY_DURATION;
                     break;
 
                 case CONSUMATORY:
+                    Serial.print("DEBUG:Transitioning from CONSUMATORY to TRIAL_OFF, Trial=");
+                    Serial.print(currentTrial);
+                    Serial.print(", Type=");
+                    Serial.println(currentTrialType);
+                    
                     setState(TRIAL_OFF);
                     logEvent(EVENT_TRIAL_END);
                     
                     // Prepare for next trial
                     currentTrial++;
+                    
+                    // Check if we've completed all trials
                     if (currentTrial >= numTrials) {
+                        Serial.println("DEBUG:All trials completed, transitioning to COMPLETE");
                         setState(COMPLETE);
                         Serial.println("SESSION_COMPLETE");
                     } else {
-                        // Get next trial type and generate new ITI
+                        // Get next trial type and start ITI
+                        // Check for memory corruption
+                        if (currentTrial < 0 || currentTrial >= numTrials || trialSequence == NULL) {
+                            Serial.println("ERROR:MEMORY_CORRUPTION");
+                            emergencyStop();
+                            return;
+                        }
+                        
                         currentTrialType = trialSequence[currentTrial];
+                        Serial.print("DEBUG:Starting next trial, Trial=");
+                        Serial.print(currentTrial);
+                        Serial.print(", Type=");
+                        Serial.println(currentTrialType);
+                        
                         setState(ITI);
                         nextStateTime = currentTime + intertrialInterval;
                     }
@@ -399,52 +497,6 @@ public:
                     break;
             }
         }
-        
-        // Check for lick events if using lick detector
-        static bool lastLickState = HIGH;
-        static unsigned long lastLickTime = 0;  // Track time of last lick for debounce
-        
-        bool currentLickState = digitalRead(LICK_PIN);
-        
-        // Only register a lick if:
-        // 1. There's a falling edge (transition from HIGH to LOW)
-        // 2. Enough time has passed since the last lick (mice can't lick faster than ~15 Hz)
-        if (currentLickState != lastLickState && currentLickState == LOW) {
-            // Check if enough time has passed since the last lick
-            if (currentTime - lastLickTime >= MIN_INTERLICK_INTERVAL) {
-                // Valid lick detected - log it
-                lastLickTime = currentTime;
-                lickCount++;
-                logEvent(EVENT_LICK);
-            } else {
-                // Lick occurred too soon after previous lick - likely sensor noise
-                // Ignore this lick but update state to prevent multiple detections
-            }
-        }
-        lastLickState = currentLickState;
-        
-        // Safety checks - ensure solenoids are not stuck on
-        // Skip safety checks for manual control or test states
-        
-        // Reward solenoid safety check - force close if not in a reward pulse state or manual control
-        if (rewardActive && 
-            !inManualControl &&
-            state != REWARD_SEQUENCE && 
-            state != TEST_REWARD) {
-            // If reward is on but we're not in a reward state, turn it off
-            setReward(false);
-            Serial.println("SAFETY:REWARD_OFF");
-        }
-        
-        // Odor solenoid safety check - force close if not in an odor state or manual control
-        if (odorActive && 
-            !inManualControl &&
-            state != ODOR_PERIOD && 
-            state != TEST_ODOR) {
-            // If odor is on but we're not in an appropriate state, turn it off
-            setOdor(false);
-            Serial.println("SAFETY:ODOR_OFF");
-        }
     }
     
     void processCommand(const String& command) {
@@ -452,6 +504,13 @@ public:
         if (command == "RESET") {
             // Force reset the state machine to IDLE
             emergencyStop();
+            return;
+        }
+        
+        else if (command == "FORCE_IDLE") {
+            // Force state machine to IDLE regardless of current state
+            setState(IDLE);
+            Serial.println("FORCED_TO_IDLE");
             return;
         }
         
@@ -489,19 +548,62 @@ public:
             // Allocate and parse new sequence
             trialSequence = (int*)malloc(numTrials * sizeof(int));
             
+            // Parse sequence into array
             int index = 0;
             int startPos = 0;
             for (int i = 0; i <= sequenceStr.length(); i++) {
                 if (i == sequenceStr.length() || sequenceStr.charAt(i) == ',') {
                     if (index < numTrials) {
-                        trialSequence[index++] = sequenceStr.substring(startPos, i).toInt();
+                        int trialType = sequenceStr.substring(startPos, i).toInt();
+                        // Validate trial type (must be 1 or 2)
+                        if (trialType != 1 && trialType != 2) {
+                            trialType = 1;  // Default to CS+ if invalid
+                        }
+                        trialSequence[index++] = trialType;
                     }
                     startPos = i + 1;
                 }
             }
             
+            // Reset trial counter
+            currentTrial = 0;
+            
+            // Set initial trial type
+            if (numTrials > 0) {
+                currentTrialType = trialSequence[0];
+            }
+            
             Serial.print("SEQUENCE_RECEIVED:");
-            Serial.println(numTrials);
+            Serial.print(numTrials);
+            Serial.print(" trials (");
+            
+            // Count trial types
+            int csPlus = 0;
+            int csMinus = 0;
+            for (int i = 0; i < numTrials; i++) {
+                if (trialSequence[i] == 1) csPlus++;
+                else if (trialSequence[i] == 2) csMinus++;
+            }
+            Serial.print(csPlus);
+            Serial.print(" CS+, ");
+            Serial.print(csMinus);
+            Serial.println(" CS-)");
+        }
+        else if (command == "TEST_LICK") {
+            // Only allow test if in IDLE state
+            if (state == IDLE) {
+                setState(LICK_TEST);
+                Serial.println("LICK_TEST:MONITORING");
+            } else {
+                Serial.println("ERROR:BUSY");
+            }
+        }
+        else if (command == "STOP_LICK_TEST") {
+            // Return to IDLE state from lick test
+            if (state == LICK_TEST) {
+                setState(IDLE);
+                Serial.println("LICK_TEST:STOPPED");
+            }
         }
         else if (command == "START") {
             // Only start if in IDLE state and not running tests
@@ -509,15 +611,22 @@ public:
                 // Reset timestamp reference when starting new session
                 timestampReference = millis();
                 
-                // Start session
+                // Start session - send session start event first
+                Serial.println("SESSION_STARTED");
+                logEvent(EVENT_SESSION_START);
+                
+                // Initialize session
                 currentTrial = 0;
                 currentTrialType = trialSequence[0];
                 setState(ITI);
                 nextStateTime = millis() + intertrialInterval;
-                logEvent(EVENT_TRIAL_START);
-                Serial.println("SESSION_STARTED");
             } else {
-                Serial.println("ERROR:BUSY");
+                // Provide detailed error information
+                Serial.print("ERROR:BUSY (State=");
+                Serial.print(state);
+                Serial.print(", Trials=");
+                Serial.print(numTrials);
+                Serial.println(")");
             }
         }
         else if (command == "ABORT") {
@@ -598,12 +707,6 @@ public:
             if (inManualControl) {
                 setState(IDLE);
             }
-        }
-        else if (command == "TEST_LICK") {
-            // Reset lick counter and report current status
-            lickCount = 0;
-            lastLickTime = 0;
-            Serial.println("LICK_TEST:MONITORING");
         }
         else if (command == "RESET_LICK_COUNT") {
             // Reset lick counter

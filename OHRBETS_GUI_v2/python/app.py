@@ -20,7 +20,8 @@ EVENT_NAMES = {
     4: "Odor Off",
     5: "Reward On",
     6: "Reward Off",
-    7: "Lick"
+    7: "Lick",
+    8: "Session Start"
 }
 
 class ArduinoInterface:
@@ -152,7 +153,7 @@ def main():
         st.session_state.arduino = ArduinoInterface()
     
     if 'data' not in st.session_state:
-        st.session_state.data = pd.DataFrame(columns=['event_code', 'event_name', 'timestamp', 'trial_number'])
+        st.session_state.data = pd.DataFrame(columns=['event_code', 'event_name', 'timestamp', 'trial_number', 'trial_type'])
     
     if 'status' not in st.session_state:
         st.session_state.status = "Not connected"
@@ -418,18 +419,30 @@ def main():
                     if st.button("Send Sequence"):
                         command = f"SEQUENCE:{sequence}"
                         if st.session_state.arduino.send_command(command):
+                            st.session_state.sequence = sequence  # Store sequence in session state
                             st.success(f"Sequence sent with {sequence.count(',')+1} trials")
                 
                 with col_start:
                     start_disabled = st.session_state.manual_reward_active
                     if st.button("Start Session", disabled=start_disabled):
+                        # First, ensure we're in IDLE state
+                        st.session_state.arduino.send_command("FORCE_IDLE")
+                        time.sleep(0.5)  # Wait for state transition
+                        
                         # Store animal ID in session state for later use when saving
                         st.session_state.animal_id = animal_id
-                        st.session_state.arduino.send_command("START")
-                        st.session_state.session_running = True
-                        st.session_state.start_time = time.time()
-                        st.session_state.data = pd.DataFrame(columns=['event_code', 'event_name', 'timestamp', 'trial_number'])
-                        st.rerun()
+                        
+                        # Send sequence first
+                        command = f"SEQUENCE:{sequence}"
+                        if st.session_state.arduino.send_command(command):
+                            time.sleep(0.5)  # Wait for sequence to be processed
+                            
+                            # Now start the session
+                            if st.session_state.arduino.send_command("START"):
+                                st.session_state.session_running = True
+                                st.session_state.start_time = time.time()
+                                st.session_state.data = pd.DataFrame(columns=['event_code', 'event_name', 'timestamp', 'trial_number', 'trial_type'])
+                                st.rerun()
             else:
                 if st.button("Abort Session", type="primary"):
                     st.session_state.arduino.send_command("ABORT")
@@ -469,6 +482,16 @@ def main():
         if not st.session_state.data.empty:
             date_str = datetime.now().strftime('%Y%m%d')
             filename = f"{date_str}_{animal_id}_pavlovian.csv"
+            
+            # Verify trial types are included in the CSV
+            if 'trial_type' in st.session_state.data.columns:
+                # Count trial types for verification
+                trial_starts = st.session_state.data[st.session_state.data['event_code'] == 1]
+                if not trial_starts.empty:
+                    cs_plus_count = len(trial_starts[trial_starts['trial_type'] == 1])
+                    cs_minus_count = len(trial_starts[trial_starts['trial_type'] == 2])
+                    st.info(f"CSV will include trial types: {cs_plus_count} CS+ trials, {cs_minus_count} CS- trials")
+            
             st.download_button(
                 "Download Data (CSV)",
                 st.session_state.data.to_csv(index=False).encode('utf-8'),
@@ -481,23 +504,42 @@ def main():
         
         # Create a metrics dashboard
         if st.session_state.session_running:
+            # Initialize all metrics with default values
+            total_licks = 0
+            cs_plus_trials = 0
+            cs_minus_trials = 0
+            elapsed = 0
+            minutes = 0
+            seconds = 0
+            rem_minutes = 0
+            rem_seconds = 0
+            total_trials = 10  # Default value
+            
             # Calculate core metrics
             total_licks = len(st.session_state.data[st.session_state.data['event_code'] == 7])
-            cs_plus_trials = len(st.session_state.data[
-                (st.session_state.data['event_code'] == 1) & 
-                (st.session_state.data['trial_type'] == 1)
-            ])
-            cs_minus_trials = len(st.session_state.data[
-                (st.session_state.data['event_code'] == 1) & 
-                (st.session_state.data['trial_type'] == 2)
-            ])
+            
+            # Calculate trial counts safely
+            if 'trial_type' in st.session_state.data.columns:
+                # Count unique trials by trial type
+                trial_starts = st.session_state.data[st.session_state.data['event_code'] == 1]
+                cs_plus_trials = len(trial_starts[trial_starts['trial_type'] == 1])
+                cs_minus_trials = len(trial_starts[trial_starts['trial_type'] == 2])
+                
+                # Debug output to help diagnose issues
+                if cs_plus_trials == 0 and cs_minus_trials == 0 and not trial_starts.empty:
+                    st.warning("Trial types not being properly assigned. Check trial type values in data.")
+                    st.write("Trial types found:", trial_starts['trial_type'].unique())
+            else:
+                cs_plus_trials = 0
+                cs_minus_trials = 0
             
             # Session timing
-            elapsed = time.time() - st.session_state.start_time
-            minutes = int(elapsed // 60)
-            seconds = int(elapsed % 60)
+            if st.session_state.start_time is not None:
+                elapsed = time.time() - st.session_state.start_time
+                minutes = int(elapsed // 60)
+                seconds = int(elapsed % 60)
             
-            # Estimate time remaining based on trial sequence
+            # Get total trials from sequence
             if 'sequence' in st.session_state:
                 total_trials = len(st.session_state.sequence.split(','))
                 completed_trials = cs_plus_trials + cs_minus_trials
@@ -507,9 +549,6 @@ def main():
                     time_remaining = remaining_trials * avg_trial_time
                     rem_minutes = int(time_remaining // 60)
                     rem_seconds = int(time_remaining % 60)
-                else:
-                    rem_minutes = 0
-                    rem_seconds = 0
             
             # Create three columns for metrics display
             col_timing, col_trials, col_behavior = st.columns(3)
@@ -517,21 +556,21 @@ def main():
             with col_timing:
                 st.markdown("### Timing")
                 st.markdown(f"""
-                <div style="background-color:#f0f2f6; padding:10px; border-radius:5px; margin:5px;">
-                    <div><b>Session Time:</b> {minutes:02d}:{seconds:02d}</div>
-                    <div><b>Est. Remaining:</b> {rem_minutes:02d}:{rem_seconds:02d}</div>
-                </div>
-                """, unsafe_allow_html=True)
+<div style="background-color:#f0f2f6; padding:10px; border-radius:5px; margin:5px;">
+    <div><b>Session Time:</b> {minutes:02d}:{seconds:02d}</div>
+    <div><b>Est. Remaining:</b> {rem_minutes:02d}:{rem_seconds:02d}</div>
+</div>
+""", unsafe_allow_html=True)
             
             with col_trials:
                 st.markdown("### Trials")
                 st.markdown(f"""
-                <div style="background-color:#f0f2f6; padding:10px; border-radius:5px; margin:5px;">
-                    <div><b>CS+ Trials:</b> {cs_plus_trials}</div>
-                    <div><b>CS- Trials:</b> {cs_minus_trials}</div>
-                    <div><b>Total Trials:</b> {cs_plus_trials + cs_minus_trials}</div>
-                </div>
-                """, unsafe_allow_html=True)
+<div style="background-color:#f0f2f6; padding:10px; border-radius:5px; margin:5px;">
+    <div><b>CS+ Trials:</b> {cs_plus_trials}</div>
+    <div><b>CS- Trials:</b> {cs_minus_trials}</div>
+    <div><b>Total Trials:</b> {cs_plus_trials + cs_minus_trials}</div>
+</div>
+""", unsafe_allow_html=True)
             
             with col_behavior:
                 st.markdown("### Behavior")
@@ -544,32 +583,39 @@ def main():
                 # Calculate CS+ vs CS- licking
                 cs_plus_licks = 0
                 cs_minus_licks = 0
-                for trial_num in st.session_state.data[st.session_state.data['trial_type'] == 1]['trial_number'].unique():
-                    trial_licks = len(st.session_state.data[
-                        (st.session_state.data['event_code'] == 7) & 
-                        (st.session_state.data['trial_number'] == trial_num)
-                    ])
-                    cs_plus_licks += trial_licks
                 
-                for trial_num in st.session_state.data[st.session_state.data['trial_type'] == 2]['trial_number'].unique():
-                    trial_licks = len(st.session_state.data[
-                        (st.session_state.data['event_code'] == 7) & 
-                        (st.session_state.data['trial_number'] == trial_num)
-                    ])
-                    cs_minus_licks += trial_licks
+                # Safely calculate licks for each trial type
+                if 'trial_type' in st.session_state.data.columns:
+                    # CS+ licks
+                    cs_plus_trials_data = st.session_state.data[st.session_state.data['trial_type'] == 1]
+                    for trial_num in cs_plus_trials_data['trial_number'].unique():
+                        trial_licks = len(st.session_state.data[
+                            (st.session_state.data['event_code'] == 7) & 
+                            (st.session_state.data['trial_number'] == trial_num)
+                        ])
+                        cs_plus_licks += trial_licks
+                    
+                    # CS- licks
+                    cs_minus_trials_data = st.session_state.data[st.session_state.data['trial_type'] == 2]
+                    for trial_num in cs_minus_trials_data['trial_number'].unique():
+                        trial_licks = len(st.session_state.data[
+                            (st.session_state.data['event_code'] == 7) & 
+                            (st.session_state.data['trial_number'] == trial_num)
+                        ])
+                        cs_minus_licks += trial_licks
                 
                 # Calculate average licks per trial
                 avg_plus_licks = cs_plus_licks / cs_plus_trials if cs_plus_trials > 0 else 0
                 avg_minus_licks = cs_minus_licks / cs_minus_trials if cs_minus_trials > 0 else 0
                 
                 st.markdown(f"""
-                <div style="background-color:#f0f2f6; padding:10px; border-radius:5px; margin:5px;">
-                    <div><b>Total Licks:</b> {total_licks}</div>
-                    <div><b>Lick Rate:</b> {lick_rate:.1f}/min</div>
-                    <div><b>Avg CS+ Licks:</b> {avg_plus_licks:.1f}</div>
-                    <div><b>Avg CS- Licks:</b> {avg_minus_licks:.1f}</div>
-                </div>
-                """, unsafe_allow_html=True)
+<div style="background-color:#f0f2f6; padding:10px; border-radius:5px; margin:5px;">
+    <div><b>Total Licks:</b> {total_licks}</div>
+    <div><b>Lick Rate:</b> {lick_rate:.1f}/min</div>
+    <div><b>Avg CS+ Licks:</b> {avg_plus_licks:.1f}</div>
+    <div><b>Avg CS- Licks:</b> {avg_minus_licks:.1f}</div>
+</div>
+""", unsafe_allow_html=True)
             
             # Add a simple progress bar
             progress = (cs_plus_trials + cs_minus_trials) / total_trials if 'sequence' in st.session_state else 0
@@ -581,55 +627,96 @@ def main():
         # Basic event log
         st.markdown("### Recent Events")
         if not st.session_state.data.empty:
-            display_df = st.session_state.data[['event_name', 'timestamp', 'trial_number']].copy()
+            display_df = st.session_state.data[['event_name', 'timestamp', 'trial_number', 'trial_type']].copy()
             display_df['timestamp'] = display_df['timestamp'].round(3)
             st.dataframe(
                 display_df.sort_values('timestamp', ascending=False).head(10),
                 use_container_width=True,
                 hide_index=True
             )
+            
+            # Debug section for trial type assignment
+            if st.checkbox("Show Debug Info"):
+                st.markdown("### Debug Information")
+                
+                # Show trial type distribution
+                trial_starts = st.session_state.data[st.session_state.data['event_code'] == 1]
+                if not trial_starts.empty:
+                    st.write("Trial Type Distribution:")
+                    trial_type_counts = trial_starts['trial_type'].value_counts()
+                    st.write(trial_type_counts)
+                    
+                    # Show sequence vs actual trial types
+                    if 'sequence' in st.session_state:
+                        st.write("Expected Sequence:", st.session_state.sequence)
+                        expected_types = [int(x.strip()) for x in st.session_state.sequence.split(',')]
+                        st.write("Expected Trial Types:", expected_types)
+                        
+                        # Compare expected vs actual
+                        if len(trial_starts) > 0:
+                            actual_types = trial_starts['trial_type'].tolist()
+                            st.write("Actual Trial Types:", actual_types)
+                            
+                            # Check for mismatches
+                            mismatches = []
+                            for i, (expected, actual) in enumerate(zip(expected_types, actual_types)):
+                                if expected != actual:
+                                    mismatches.append(f"Trial {i+1}: Expected {expected}, Got {actual}")
+                            
+                            if mismatches:
+                                st.error("Mismatches found between expected and actual trial types:")
+                                for mismatch in mismatches:
+                                    st.write(mismatch)
+                            else:
+                                st.success("All trial types match expected sequence")
 
     # Callback functions for Arduino interface
     def handle_data(event_code, timestamp):
-        # Add trial type information based on trial starts
-        if event_code == 1:  # Trial Start
-            trial_starts = [row for row in st.session_state.arduino.data if row[0] == 1]
-            trial_number = len(trial_starts)
-            
-            # Try to determine trial type (CS+ or CS-)
-            # Assuming trials alternate or follow some pattern
-            trial_type = None
-            if trial_number > 0 and st.session_state.arduino.data:
-                # Look at most recent data to determine trial type
-                for i in range(len(st.session_state.arduino.data)-1, -1, -1):
-                    if st.session_state.arduino.data[i][0] == 3:  # Odor On
-                        # Assuming Odor1 = CS+ = 1, Odor2 = CS- = 2
-                        # This is a simplification; actual type may need to be determined from sequence
-                        trial_type = 1  # Default to CS+
-                        break
-        else:
-            # For non-trial-start events, get trial number from most recent trial start
-            trial_starts = [row for row in st.session_state.arduino.data if row[0] == 1]
-            trial_number = len(trial_starts)
-            trial_type = None
-            
-            # Update lick count for lick sensor test
-            if event_code == 7 and st.session_state.lick_test_active:  # Lick event
-                st.session_state.lick_count += 1
-                st.session_state.last_lick_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        # Initialize session state variables for trial context if they don't exist
+        if 'current_trial_context' not in st.session_state:
+            st.session_state.current_trial_context = {
+                'trial_number': 0,
+                'trial_type': None
+            }
         
-        # Add to dataframe
+        # For session start, just log it
+        if event_code == 8:  # Session Start
+            new_row = pd.DataFrame({
+                'event_code': [event_code],
+                'event_name': [EVENT_NAMES.get(event_code, f"Unknown ({event_code})")],
+                'timestamp': [timestamp],
+                'trial_number': [0],  # No trial number for session start
+                'trial_type': [None]  # No trial type for session start
+            })
+            st.session_state.data = pd.concat([st.session_state.data, new_row], ignore_index=True)
+            return
+
+        # For trial start events, update the trial context
+        if event_code == 1:  # Trial Start
+            # Increment trial number
+            st.session_state.current_trial_context['trial_number'] += 1
+            
+            # Get trial type from sequence (0-based indexing)
+            if 'sequence' in st.session_state:
+                sequence_list = [int(x.strip()) for x in st.session_state.sequence.split(',')]
+                if st.session_state.current_trial_context['trial_number'] <= len(sequence_list):
+                    st.session_state.current_trial_context['trial_type'] = sequence_list[st.session_state.current_trial_context['trial_number'] - 1]
+        
+        # Add to dataframe using the current trial context
         new_row = pd.DataFrame({
             'event_code': [event_code],
             'event_name': [EVENT_NAMES.get(event_code, f"Unknown ({event_code})")],
             'timestamp': [timestamp],
-            'trial_number': [trial_number],
+            'trial_number': [st.session_state.current_trial_context['trial_number']],
+            'trial_type': [st.session_state.current_trial_context['trial_type']]
         })
         
-        if trial_type is not None:
-            new_row['trial_type'] = trial_type
-        
         st.session_state.data = pd.concat([st.session_state.data, new_row], ignore_index=True)
+        
+        # Update lick count for lick sensor test
+        if event_code == 7 and st.session_state.lick_test_active:  # Lick event
+            st.session_state.lick_count += 1
+            st.session_state.last_lick_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     
     def handle_status(message):
         # Handle status messages from Arduino
