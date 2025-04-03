@@ -4,6 +4,11 @@
 
 OHRBETS GUI (Operant Hardware for Rodent Behavioral Experiments & Tracking System) is a comprehensive platform for conducting Pavlovian odor conditioning experiments. Developed by the Stuber Lab at the University of Washington, this system integrates Arduino-based hardware control with a Streamlit-powered Python dashboard for experiment configuration, real-time monitoring, and data analysis.
 
+This implementation is part of the [OHRBETS (Open-Source Head-fixed Rodent Behavioral Experimental Training System)](https://github.com/agordonfennell/OHRBETS) platform, an open-source ecosystem of hardware and software for head-fixed behavior.
+
+This work is based on:
+> Gordon-Fennell, A., Barbakh, J. M., Utley, M. T., Singh, S., Bazzino, P., Gowrishankar, R., Bruchas, M. R., Roitman, M. F., & Stuber, G. D. (2023). An open-source platform for head-fixed operant and consummatory behavior. *eLife*, 12, e86183. [https://doi.org/10.7554/eLife.86183](https://elifesciences.org/articles/86183)
+
 ## Features
 
 ### Hardware Control
