@@ -368,23 +368,40 @@ def main():
         st.write("### ITI Settings")
         col_iti_min, col_iti_max = st.columns(2)
         with col_iti_min:
-            iti_min = st.number_input("Minimum ITI (s)", min_value=1, max_value=30, value=5, step=1)
+            # Use a key to manage the state of this input
+            iti_min = st.number_input("Minimum ITI (s)", min_value=1, max_value=30, value=st.session_state.get('iti_min_val', 5), step=1, key='iti_min_val')
         with col_iti_max:
-            iti_max = st.number_input("Maximum ITI (s)", min_value=iti_min, max_value=30, value=10, step=1)
+            # Ensure the default/current value for iti_max is always >= iti_min
+            current_iti_max = st.session_state.get('iti_max_val', 10) # Get current value or default 10
+            # Adjust the value if it's lower than the current minimum
+            adjusted_iti_max = max(iti_min, current_iti_max)
+            
+            iti_max = st.number_input("Maximum ITI (s)", 
+                                      min_value=iti_min, 
+                                      max_value=30, 
+                                      value=adjusted_iti_max, # Use the adjusted value
+                                      step=1, 
+                                      key='iti_max_val')
             
         st.info(f"ITI will be randomly sampled between {iti_min}-{iti_max} seconds in 1s intervals")
         
-        # When sending timing command, convert to milliseconds
-        if st.button("Apply ITI Settings"):
-            # Convert to milliseconds for Arduino
-            iti_min_ms = iti_min * 1000
-            iti_max_ms = iti_max * 1000
-            command = f"SET_ITI_RANGE:{iti_min_ms},{iti_max_ms}"
-            if st.session_state.arduino.send_command(command):
-                st.success(f"ITI range set: {iti_min}-{iti_max} seconds")
+        # Reward Timing Settings
+        st.write("### Reward Timing Settings")
+        col_r1, col_r_delay, col_r2 = st.columns(3)
+        with col_r1:
+            reward_p1 = st.number_input("Pulse 1 (ms)", min_value=10, max_value=200, value=40, step=5)
+        with col_r_delay:
+            reward_delay = st.number_input("Delay (ms)", min_value=0, max_value=1000, value=140, step=10)
+        with col_r2:
+            reward_p2 = st.number_input("Pulse 2 (ms)", min_value=10, max_value=200, value=40, step=5)
         
-        # Information about hardcoded timing
-        st.info("⚠️ Odor duration (2000ms) and reward pattern (40ms-140ms-40ms) are now hardcoded in the Arduino firmware for precise timing control.")
+        if st.button("Apply Reward Timing"):
+            command = f"SET_REWARD_TIMING:{reward_p1},{reward_delay},{reward_p2}"
+            if st.session_state.arduino.send_command(command):
+                st.success(f"Reward timing set: {reward_p1}ms - {reward_delay}ms - {reward_p2}ms")
+        
+        # Information about hardcoded odor timing
+        st.info("⚠️ Odor duration (2000ms) is hardcoded in the Arduino firmware.")
         
         # Trial sequence
         st.write("### Trial Sequence")
@@ -433,34 +450,44 @@ def main():
                     
                     # Verify IDLE state
                     if st.session_state.arduino_status.startswith("STATUS:0"):
-                        st.session_state.status = "Arduino IDLE. Sending sequence..."
+                        st.session_state.status = "Arduino IDLE. Sending settings..."
                         
-                        # 2. Get current sequence from text area and store it
-                        current_sequence = st.session_state.sequence_input
-                        st.session_state.sequence = current_sequence # Store the sequence for this session
-                        
-                        # 3. Send the sequence to Arduino
-                        command = f"SEQUENCE:{current_sequence}"
-                        if st.session_state.arduino.send_command(command):
-                            st.success(f"Sequence sent ({current_sequence.count(',')+1} trials). Starting session...")
-                            time.sleep(0.5)  # Wait for Arduino to process
+                        # 2. Send CURRENT ITI settings before starting
+                        iti_min_ms = st.session_state.iti_min_val * 1000
+                        iti_max_ms = st.session_state.iti_max_val * 1000
+                        iti_command = f"SET_ITI_RANGE:{iti_min_ms},{iti_max_ms}"
+                        if st.session_state.arduino.send_command(iti_command):
+                            st.success(f"Sent ITI range: {st.session_state.iti_min_val}-{st.session_state.iti_max_val}s. Sending sequence...")
+                            time.sleep(0.5) # Wait for Arduino to process
                             
-                            # 4. Send START command
-                            if st.session_state.arduino.send_command("START"):
-                                # Clear previous session data & reset states
-                                st.session_state.data = pd.DataFrame(columns=['event_code', 'event_name', 'timestamp', 'trial_number', 'trial_type'])
-                                st.session_state.arduino.clear_internal_data()
-                                st.session_state.start_time = time.time()
-                                st.session_state.session_running = True
-                                st.session_state.current_trial_context = {'trial_number': 0, 'trial_type': None}
-                                st.session_state.lick_count = 0
-                                st.session_state.last_lick_time = 0
-                                st.session_state.arduino_status = ""
-                                st.rerun()
+                            # 3. Get current sequence from text area and store it
+                            current_sequence = st.session_state.sequence_input
+                            st.session_state.sequence = current_sequence # Store the sequence for this session
+                            
+                            # 4. Send the sequence to Arduino
+                            sequence_command = f"SEQUENCE:{current_sequence}"
+                            if st.session_state.arduino.send_command(sequence_command):
+                                st.success(f"Sequence sent ({current_sequence.count(',')+1} trials). Starting session...")
+                                time.sleep(0.5)  # Wait for Arduino to process
+                                
+                                # 5. Send START command
+                                if st.session_state.arduino.send_command("START"):
+                                    # Initialize session variables AFTER confirming start
+                                    st.session_state.session_running = True
+                                    st.session_state.start_time = time.time()
+                                    st.session_state.data = pd.DataFrame(columns=['event_code', 'event_name', 'timestamp', 'trial_number', 'trial_type'])
+                                    st.session_state.arduino.clear_internal_data()
+                                    st.session_state.current_trial_context = {'trial_number': 0, 'trial_type': None}
+                                    st.session_state.lick_count = 0
+                                    st.session_state.last_lick_time = 0
+                                    st.session_state.arduino_status = ""
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to send START command.")
                             else:
-                                st.error("Failed to send START command.")
+                                st.error("Failed to send SEQUENCE command.")
                         else:
-                            st.error("Failed to send SEQUENCE command.")
+                            st.error("Failed to send ITI settings command.")
                     else:
                         st.error(f"Failed to reset Arduino to IDLE. Current status: {st.session_state.arduino_status}")
             else:
@@ -468,6 +495,33 @@ def main():
                 if st.button("Abort Session", type="primary"):
                     st.session_state.arduino.send_command("ABORT")
                     st.session_state.session_running = False
+                    
+                    # Wait briefly for Arduino to process ABORT
+                    time.sleep(0.5) 
+                    
+                    # Request status to confirm it reset to IDLE
+                    st.session_state.arduino.send_command("STATUS")
+                    time.sleep(0.5) # Wait for status response
+                    st.session_state.arduino.process_queue() # Process the response
+
+                    # Update status message based on confirmation
+                    if st.session_state.arduino_status.startswith("STATUS:0"):
+                        st.session_state.status = "Session aborted. Arduino reset to IDLE."
+                    else:
+                        st.session_state.status = f"Session aborted. Arduino status: {st.session_state.arduino_status}" 
+                    
+                    # Explicitly reset relevant session state variables
+                    st.session_state.data = pd.DataFrame(columns=['event_code', 'event_name', 'timestamp', 'trial_number', 'trial_type'])
+                    st.session_state.arduino.clear_internal_data()
+                    st.session_state.start_time = None
+                    st.session_state.current_trial_context = {'trial_number': 0, 'trial_type': None}
+                    st.session_state.lick_count = 0
+                    st.session_state.last_lick_time = 0
+                    # Keep arduino_status from the check above
+                    st.session_state.lick_test_active = False
+                    st.session_state.manual_reward_active = False 
+                    st.session_state.manual_odor_active = False
+                    
                     st.rerun()
         
         # Status and info
@@ -808,9 +862,17 @@ def main():
         
         # Only update status if it's one of these important messages
         important_messages = ["SESSION_STARTED", "SESSION_COMPLETE", "SESSION_ABORTED", 
-                              "READY", "SEQUENCE_RECEIVED", "TIMING_SET"]
+                              "READY", "SEQUENCE_RECEIVED"]
         
-        if message in important_messages or any(message.startswith(prefix) for prefix in ["SEQUENCE_RECEIVED:", "TIMING_SET:"]):
+        # Handle specific timing confirmations
+        if message.startswith("ITI_RANGE_SET:"):
+            st.session_state.status = f"ITI Range Updated: {message.split(':')[1]}"
+            return
+        elif message.startswith("REWARD_TIMING_SET:"):
+            st.session_state.status = f"Reward Timing Updated: {message.split(':')[1]} (P1, Delay, P2)"
+            return
+        
+        if message in important_messages or message.startswith("SEQUENCE_RECEIVED:"):
             if message == "SESSION_STARTED":
                 st.session_state.status = "Session running"
                 st.session_state.session_running = True
@@ -851,8 +913,6 @@ def main():
                 st.session_state.status = "Arduino ready"
             elif message.startswith("SEQUENCE_RECEIVED"):
                 st.session_state.status = "Sequence received"
-            elif message.startswith("TIMING_SET"):
-                st.session_state.status = "Timing parameters set"
             else:
                 st.session_state.status = message
     

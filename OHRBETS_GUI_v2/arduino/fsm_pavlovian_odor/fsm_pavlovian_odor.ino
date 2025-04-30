@@ -52,14 +52,20 @@
 #define TEST_ODOR_DURATION    2000    // 2 seconds for manual odor test
 #define TEST_REWARD_DURATION  220     // Combined duration of reward sequence (40+140+40)
 
-// Timeout for stuck states (ms)
-#define STATE_TIMEOUT 10000
+// Timeout for stuck states (ms) - reset to IDLE if a state lasts too long
+#define STATE_TIMEOUT 60000  // Increased to 60 seconds (was 10000ms) to accommodate long ITIs
 
 // Lick detector configuration
 #define LICK_SIGNAL_INVERTED false  // Set to false if lick gives LOW signal
 
 // Timing precision: use milliseconds for all timestamps and state transitions
 // State machine: use non-blocking design with millis() for state transitions
+
+// --- Reward Timing --- 
+// Default values, now configurable via serial command
+int rewardPulse1Duration = 40;    // First reward pulse (ms)
+int rewardDelayDuration = 140;   // Delay between pulses (ms)
+int rewardPulse2Duration = 40;    // Second reward pulse (ms)
 
 class PavlovianController {
 private:
@@ -70,16 +76,17 @@ private:
         TRIAL_INIT,
         ODOR_PERIOD,
         TRACE_INTERVAL,
-        // Restore reward states for non-blocking trial sequence
-        REWARD_PULSE1,
-        REWARD_DELAY,
+        // Reward sequence states (non-blocking)
+        REWARD_PULSE1, 
+        REWARD_DELAY, 
         REWARD_PULSE2,
+        // -- End Reward Sequence --
         CONSUMATORY,
         TRIAL_OFF,
         COMPLETE,
-        // Test states (still use direct blocking delays)
-        TEST_ODOR,
-        TEST_REWARD,
+        // Test states (blocking test functions are used now)
+        TEST_ODOR, 
+        TEST_REWARD, 
         LICK_TEST,
         // Manual control states
         MANUAL_ODOR_CONTROL,
@@ -103,9 +110,10 @@ private:
     int currentTrialType = 0;
     
     // Timing parameters (milliseconds)
-    int intertrialInterval = DEFAULT_ITI_DURATION;
+    unsigned long iti_min_ms = DEFAULT_ITI_DURATION;
+    unsigned long iti_max_ms = DEFAULT_ITI_DURATION + 5000;
     int odorDuration = DEFAULT_ODOR_DURATION;
-    int rewardDuration = DEFAULT_REWARD_DURATION;
+    // Reward timings are global variables now
     
     // LED blink timing (non-blocking)
     unsigned long ledOffTime = 0;
@@ -215,20 +223,20 @@ private:
     // Set state with proper transition logging
     void setState(State newState) {
         State oldState = state;
+        // Prevent setting state if currently in a blocking test function
+        if (state == TEST_ODOR || state == TEST_REWARD) {
+            Serial.println("WARNING: Attempted state change during blocking test.");
+            return; 
+        }
         state = newState;
         stateStartTime = millis(); // Reset state timer
         printStateTransition(oldState, newState);
         
         // If entering IDLE state, ensure all outputs are off and reset flags
         if (newState == IDLE) {
-            if (odorActive) {
-                setOdor(false);
-            }
-            if (rewardActive) {
-                setReward(false);
-            }
+            if (odorActive) setOdor(false);
+            if (rewardActive) setReward(false);
             inManualControl = false;
-            // Reset lick test state if it was active
             if (oldState == LICK_TEST) {
                 lickCount = 0;
                 lastLickTime = 0;
@@ -239,71 +247,41 @@ private:
         if (newState == MANUAL_ODOR_CONTROL || newState == MANUAL_REWARD_CONTROL) {
             inManualControl = true;
         }
-        
-        // Debug output for state change
-        Serial.print("DEBUG:State=");
-        Serial.print(newState);
-        Serial.print(",Manual=");
-        Serial.print(inManualControl);
-        Serial.print(",Time=");
-        Serial.println(millis());
+        // Clear manual control flag when exiting manual states
+        else {
+             inManualControl = false;
+        }
     }
     
-    // Direct odor test with precise timing
+    // Direct odor test with precise timing (Uses global odorDuration)
     void directOdorTest() {
         Serial.println("DIRECT_ODOR_TEST_START");
-        
-        // Set state to TEST_ODOR // Removed state change
-        // setState(TEST_ODOR);
-        
-        // Turn on odor solenoid
-        digitalWrite(LED_PIN, HIGH);  // LED indicator
+        digitalWrite(LED_PIN, HIGH);
         setOdor(true);
-        
-        // Wait exactly 2 seconds with blocking delay
-        delay(odorDuration);
-        
-        // Turn off odor solenoid
+        delay(odorDuration); // Use variable
         setOdor(false);
         digitalWrite(LED_PIN, LOW);
-        
-        // Return to idle state // Removed state change
-        // setState(IDLE);
         Serial.println("DIRECT_ODOR_TEST_COMPLETE");
     }
     
-    // Direct reward test with precise timing for the pattern
+    // Direct reward test uses global variables for duration
     void directRewardTest() {
         Serial.println("DIRECT_REWARD_TEST_START");
-        
-        // Set state to TEST_REWARD // Removed state change
-        // setState(TEST_REWARD);
-        
-        // First pulse (40ms)
         digitalWrite(LED_PIN, HIGH);
         setReward(true);
         Serial.println("REWARD_PULSE1_ON");
-        delay(REWARD_PULSE1_DURATION);
-        
-        // Inter-pulse delay (140ms)
+        delay(rewardPulse1Duration); // Use variable
         setReward(false);
         digitalWrite(LED_PIN, LOW);
         Serial.println("REWARD_PULSE1_OFF");
-        delay(REWARD_DELAY_DURATION);
-        
-        // Second pulse (40ms)
+        delay(rewardDelayDuration); // Use variable
         digitalWrite(LED_PIN, HIGH);
         setReward(true);
         Serial.println("REWARD_PULSE2_ON");
-        delay(REWARD_PULSE2_DURATION);
-        
-        // Turn off
+        delay(rewardPulse2Duration); // Use variable
         setReward(false);
         digitalWrite(LED_PIN, LOW);
         Serial.println("REWARD_PULSE2_OFF");
-        
-        // Return to idle state // Removed state change
-        // setState(IDLE);
         Serial.println("DIRECT_REWARD_TEST_COMPLETE");
     }
 
@@ -351,6 +329,20 @@ private:
         lasttouched = currtouched;
     }
 
+    // Function to generate random ITI in ms, sampled in 1s steps
+    unsigned long getRandomITI() {
+        // Ensure min <= max
+        if (iti_min_ms > iti_max_ms) {
+           iti_max_ms = iti_min_ms; // Or swap them, depending on desired behavior
+        }
+        unsigned long range_steps = (iti_max_ms - iti_min_ms) / 1000;
+        unsigned long random_step = random(range_steps + 1);
+        unsigned long duration = iti_min_ms + (random_step * 1000);
+        Serial.print("DEBUG:Generated ITI Duration = ");
+        Serial.println(duration);
+        return duration;
+    }
+
 public:
     void begin() {
         initializeHardware();
@@ -363,8 +355,14 @@ public:
         // Non-blocking state machine
         unsigned long currentTime = millis();
         
-        // Check for licks
-        checkLicks();
+        // Check for licks (less frequently during ITI)
+        static unsigned long lastLickCheckTime = 0;
+        // Check every 10ms normally, but only every 100ms during ITI
+        unsigned long lickCheckInterval = (state == ITI) ? 100 : 10; 
+        if (currentTime - lastLickCheckTime >= lickCheckInterval) {
+            checkLicks();
+            lastLickCheckTime = currentTime;
+        }
         
         // Check for state timeout - prevent stuck states
         if (state != IDLE && !inManualControl && (currentTime - stateStartTime) > STATE_TIMEOUT) {
@@ -382,36 +380,34 @@ public:
         if (state != IDLE && state != COMPLETE && !inManualControl && currentTime >= nextStateTime) {
             switch (state) {
                 case ITI:
-                    // ITI complete, start new trial sequence
+                    // ITI duration has elapsed
+                    Serial.print("DEBUG: Exiting ITI state at "); 
+                    Serial.println(currentTime);
                     setState(TRIAL_INIT);
-                    logEvent(EVENT_TRIAL_START);
+                    logEvent(EVENT_TRIAL_START); // Log START *after* ITI
                     nextStateTime = currentTime + TRIAL_INIT_DURATION;
                     break;
 
                 case TRIAL_INIT:
-                    // Start odor period
                     setState(ODOR_PERIOD);
                     setOdor(true);
-                    nextStateTime = currentTime + odorDuration;  // 2s odor
+                    nextStateTime = currentTime + odorDuration;
                     break;
 
                 case ODOR_PERIOD:
-                    // End odor, start trace interval
                     setOdor(false);
                     setState(TRACE_INTERVAL);
                     nextStateTime = currentTime + TRACE_INTERVAL_DURATION;
                     break;
 
                 case TRACE_INTERVAL:
-                    if (currentTrialType == 1) {  // CS+
-                        // Start the non-blocking reward pulse sequence
+                    if (currentTrialType == 1) { // CS+
                         setState(REWARD_PULSE1);
                         setReward(true);
-                        nextStateTime = currentTime + REWARD_PULSE1_DURATION;
+                        nextStateTime = currentTime + rewardPulse1Duration;
                     } else { // CS-
-                        // Skip reward sequence, go directly to consumatory period
                         setState(CONSUMATORY);
-                        nextStateTime = currentTime + CONSUMATORY_DURATION; 
+                        nextStateTime = currentTime + CONSUMATORY_DURATION;
                     }
                     break;
 
@@ -419,63 +415,56 @@ public:
                 case REWARD_PULSE1:
                     setReward(false);
                     setState(REWARD_DELAY);
-                    nextStateTime = currentTime + REWARD_DELAY_DURATION;
+                    nextStateTime = currentTime + rewardDelayDuration;
                     break;
                 
                 case REWARD_DELAY:
                     setReward(true);
                     setState(REWARD_PULSE2);
-                    nextStateTime = currentTime + REWARD_PULSE2_DURATION;
+                    nextStateTime = currentTime + rewardPulse2Duration;
                     break;
                 
                 case REWARD_PULSE2:
                     setReward(false);
-                    // Reward sequence finished, move to consumatory period
                     setState(CONSUMATORY);
                     nextStateTime = currentTime + CONSUMATORY_DURATION;
                     break;
 
                 case CONSUMATORY:
-                    // Consumatory period finished, end the trial
                     setState(TRIAL_OFF);
                     logEvent(EVENT_TRIAL_END);
-                    nextStateTime = currentTime; // Immediately check for next state (ITI or COMPLETE)
+                    nextStateTime = currentTime;
                     break;
-
+                    
                 case TRIAL_OFF:
-                    // Prepare for next trial or end session
                     currentTrial++;
                     if (currentTrial >= numTrials) {
-                        Serial.println("DEBUG:All trials completed, transitioning to COMPLETE");
                         setState(COMPLETE);
                         Serial.println("SESSION_COMPLETE");
                     } else {
-                        // Get next trial type and start ITI
-                        // Check for memory corruption
                         if (currentTrial < 0 || currentTrial >= numTrials || trialSequence == NULL) {
                             Serial.println("ERROR:MEMORY_CORRUPTION");
                             emergencyStop();
                             return;
                         }
-                        
                         currentTrialType = trialSequence[currentTrial];
-                        Serial.print("DEBUG:Starting next trial, Trial=");
-                        Serial.print(currentTrial + 1); // Display 1-based trial number
+                        unsigned long nextITI = getRandomITI(); 
+                        setState(ITI); 
+                        nextStateTime = currentTime + nextITI; 
+                        Serial.print("DEBUG: Entering ITI state for Trial ");
+                        Serial.print(currentTrial + 1);
                         Serial.print(", Type=");
-                        Serial.println(currentTrialType);
-                        
-                        setState(ITI);
-                        nextStateTime = currentTime + intertrialInterval;
+                        Serial.print(currentTrialType);
+                        Serial.print(", Duration=");
+                        Serial.println(nextITI);
                     }
                     break;
 
                 case COMPLETE:
-                    // Move back to IDLE state when complete
                     setState(IDLE);
                     break;
 
                 default:
-                    // Unknown state - reset to IDLE
                     setState(IDLE);
                     break;
             }
@@ -485,7 +474,6 @@ public:
         checkLicks(); 
         
         // Safety checks (non-blocking)
-        // ... (existing safety checks remain the same, check rewardActive against REWARD_PULSE1/2, not REWARD_SEQUENCE)
         if (rewardActive && !inManualControl && 
             state != REWARD_PULSE1 && state != REWARD_PULSE2) { 
             setReward(false);
@@ -512,19 +500,50 @@ public:
         }
         
         // --- Timing and Sequence Commands --- 
-        if (command.startsWith("SET_TIMING:")) {
-            // Format: SET_TIMING:iti,odor,reward
-            // Example: SET_TIMING:5000,2000,500
-            // Note: Only ITI is configurable now, odor and reward are hardcoded
-            int comma1 = command.indexOf(',', 11);
-            
+        if (command.startsWith("SET_ITI_RANGE:")) { // Command for ITI range
+            int comma1 = command.indexOf(',', 14); // Index after "SET_ITI_RANGE:"
             if (comma1 > 0) {
-                intertrialInterval = command.substring(11, comma1).toInt();
+                iti_min_ms = command.substring(14, comma1).toInt();
+                iti_max_ms = command.substring(comma1 + 1).toInt();
                 
-                // Keep odor and reward duration hardcoded but acknowledge receipt
-                Serial.print("TIMING_SET:ITI=");
-                Serial.print(intertrialInterval);
-                Serial.println("ms (Odor and Reward timing are hardcoded)");
+                // Validation
+                if (iti_min_ms < 1000) iti_min_ms = 1000;
+                if (iti_max_ms < iti_min_ms) iti_max_ms = iti_min_ms;
+                if (iti_max_ms > 60000) iti_max_ms = 60000; // Max 60s
+                
+                Serial.print("ITI_RANGE_SET:");
+                Serial.print(iti_min_ms);
+                Serial.print("-");
+                Serial.print(iti_max_ms);
+                Serial.println("ms");
+            } else {
+                 Serial.println("ERROR:INVALID_ITI_RANGE_FORMAT");
+            }
+        }
+        else if (command.startsWith("SET_REWARD_TIMING:")) { // New command for reward timing
+            // Format: SET_REWARD_TIMING:pulse1_ms,delay_ms,pulse2_ms
+            int comma1 = command.indexOf(',', 18); // Index after "SET_REWARD_TIMING:"
+            int comma2 = command.indexOf(',', comma1 + 1);
+            
+            if (comma1 > 0 && comma2 > 0) {
+                // Parse values
+                int p1 = command.substring(18, comma1).toInt();
+                int d = command.substring(comma1 + 1, comma2).toInt();
+                int p2 = command.substring(comma2 + 1).toInt();
+                
+                // Basic validation (ensure positive values)
+                rewardPulse1Duration = (p1 > 0) ? p1 : REWARD_PULSE1_DURATION; // Keep default if invalid
+                rewardDelayDuration = (d >= 0) ? d : REWARD_DELAY_DURATION; // Allow 0 delay
+                rewardPulse2Duration = (p2 > 0) ? p2 : REWARD_PULSE2_DURATION; // Keep default if invalid
+                
+                Serial.print("REWARD_TIMING_SET:");
+                Serial.print(rewardPulse1Duration);
+                Serial.print(",");
+                Serial.print(rewardDelayDuration);
+                Serial.print(",");
+                Serial.println(rewardPulse2Duration);
+            } else {
+                Serial.println("ERROR:INVALID_REWARD_TIMING_FORMAT");
             }
         }
         else if (command.startsWith("SEQUENCE:")) {
@@ -596,8 +615,11 @@ public:
                 logEvent(EVENT_SESSION_START);
                 currentTrial = 0;
                 currentTrialType = trialSequence[0];
+                unsigned long firstITI = getRandomITI();
                 setState(ITI);
-                nextStateTime = millis() + intertrialInterval;
+                nextStateTime = millis() + firstITI; 
+                Serial.print("DEBUG: Starting First ITI, Duration=");
+                Serial.println(firstITI);
             } else {
                 Serial.print("ERROR:BUSY (State=");
                 Serial.print(state);
