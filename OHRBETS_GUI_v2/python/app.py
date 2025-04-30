@@ -138,6 +138,16 @@ class ArduinoInterface:
                 self.status_callback(data)
             messages_processed += 1
 
+    def clear_internal_data(self):
+        """Clear the internal raw data list."""
+        self.data = []
+        # Optionally clear the message queue too if needed
+        while not self.message_queue.empty():
+            try:
+                self.message_queue.get_nowait()
+            except queue.Empty:
+                break
+
 def main():
     st.set_page_config(
         page_title="Pavlovian Odor Conditioning",
@@ -279,24 +289,19 @@ def main():
             
             # Manual reward control
             st.write("Direct Reward Control:")
-            col_reward_on, col_reward_off = st.columns(2)
-            with col_reward_on:
-                if not st.session_state.manual_reward_active:
-                    if st.button("Reward ON", type="primary"):
-                        if st.session_state.arduino.send_command("MANUAL_REWARD_ON"):
-                            st.session_state.manual_reward_active = True
-                            st.rerun()
-            
-            with col_reward_off:
+            if st.button("Reward ON/OFF", type="primary" if st.session_state.manual_reward_active else "secondary"):
                 if st.session_state.manual_reward_active:
-                    if st.button("Reward OFF", type="primary"):
-                        if st.session_state.arduino.send_command("MANUAL_REWARD_OFF"):
-                            st.session_state.manual_reward_active = False
-                            st.rerun()
+                    if st.session_state.arduino.send_command("MANUAL_REWARD_OFF"):
+                        st.session_state.manual_reward_active = False
+                        st.rerun()
+                else:
+                    if st.session_state.arduino.send_command("MANUAL_REWARD_ON"):
+                        st.session_state.manual_reward_active = True
+                        st.rerun()
             
             # Warning if manual reward is active
             if st.session_state.manual_reward_active:
-                st.warning("⚠️ Reward solenoid is currently ON. Click 'Reward OFF' to deactivate.")
+                st.warning("⚠️ Reward solenoid is currently ON. Click 'Reward ON/OFF' again to deactivate.")
             
             # Lick sensor test
             st.write("**Lick Sensor:**")
@@ -385,23 +390,25 @@ def main():
         st.write("### Trial Sequence")
         st.write("Enter trial types (1=CS+, 2=CS-) separated by commas:")
         
-        default_sequence = "1,2,1,2,1,1,2,2,1,2"
-        sequence = st.text_area("Sequence", default_sequence)
+        # Use session state to preserve sequence input across reruns
+        if 'sequence_input' not in st.session_state:
+            st.session_state.sequence_input = "1,2,1,2,1,1,2,2,1,2"
+        sequence_input = st.text_area("Sequence", st.session_state.sequence_input, key="sequence_text_area")
+        st.session_state.sequence_input = sequence_input # Update session state on change
         
-        # Generate a balanced random sequence
+        # Generate a balanced random sequence button
         col_gen, col_trials = st.columns(2)
         with col_gen:
-            if st.button("Generate Random"):
+            if st.button("Generate Random Sequence"):
                 num_trials = st.session_state.get('num_trials', 10)
                 num_cs_plus = num_trials // 2
                 sequence_list = [1] * num_cs_plus + [2] * (num_trials - num_cs_plus)
                 np.random.shuffle(sequence_list)
-                sequence = ','.join(map(str, sequence_list))
-                st.session_state.sequence = sequence
-                st.rerun()
+                st.session_state.sequence_input = ','.join(map(str, sequence_list))
+                st.rerun() # Rerun to update the text area
                 
         with col_trials:
-            num_trials = st.number_input("Number of Trials", min_value=2, max_value=100, value=10, step=2)
+            num_trials = st.number_input("Number of Trials", min_value=2, max_value=200, value=10, step=2) # Increased max
             st.session_state.num_trials = num_trials
         
         # Session control
@@ -409,41 +416,55 @@ def main():
         
         if st.session_state.arduino.connected:
             if not st.session_state.session_running:
-                # Ensure manual reward is off before starting a session
-                if st.session_state.manual_reward_active:
-                    st.warning("⚠️ Turn off manual reward control before starting a session.")
+                # Ensure manual controls are off before starting
+                start_disabled = st.session_state.manual_reward_active or st.session_state.manual_odor_active
+                if start_disabled:
+                    st.warning("⚠️ Turn off manual controls before starting a session.")
                 
-                col_send, col_start = st.columns(2)
-                
-                with col_send:
-                    if st.button("Send Sequence"):
-                        command = f"SEQUENCE:{sequence}"
-                        if st.session_state.arduino.send_command(command):
-                            st.session_state.sequence = sequence  # Store sequence in session state
-                            st.success(f"Sequence sent with {sequence.count(',')+1} trials")
-                
-                with col_start:
-                    start_disabled = st.session_state.manual_reward_active
-                    if st.button("Start Session", disabled=start_disabled):
-                        # First, ensure we're in IDLE state
-                        st.session_state.arduino.send_command("FORCE_IDLE")
-                        time.sleep(0.5)  # Wait for state transition
+                # Combined Start Button (sends sequence first)
+                if st.button("Start Session", disabled=start_disabled):
+                    # 1. Force Arduino to IDLE state
+                    st.session_state.status = "Resetting Arduino..."
+                    st.session_state.arduino.send_command("FORCE_IDLE")
+                    time.sleep(0.2)
+                    st.session_state.arduino.send_command("STATUS")
+                    time.sleep(0.5)
+                    st.session_state.arduino.process_queue() # Process status response
+                    
+                    # Verify IDLE state
+                    if st.session_state.arduino_status.startswith("STATUS:0"):
+                        st.session_state.status = "Arduino IDLE. Sending sequence..."
                         
-                        # Store animal ID in session state for later use when saving
-                        st.session_state.animal_id = animal_id
+                        # 2. Get current sequence from text area and store it
+                        current_sequence = st.session_state.sequence_input
+                        st.session_state.sequence = current_sequence # Store the sequence for this session
                         
-                        # Send sequence first
-                        command = f"SEQUENCE:{sequence}"
+                        # 3. Send the sequence to Arduino
+                        command = f"SEQUENCE:{current_sequence}"
                         if st.session_state.arduino.send_command(command):
-                            time.sleep(0.5)  # Wait for sequence to be processed
+                            st.success(f"Sequence sent ({current_sequence.count(',')+1} trials). Starting session...")
+                            time.sleep(0.5)  # Wait for Arduino to process
                             
-                            # Now start the session
+                            # 4. Send START command
                             if st.session_state.arduino.send_command("START"):
-                                st.session_state.session_running = True
-                                st.session_state.start_time = time.time()
+                                # Clear previous session data & reset states
                                 st.session_state.data = pd.DataFrame(columns=['event_code', 'event_name', 'timestamp', 'trial_number', 'trial_type'])
+                                st.session_state.arduino.clear_internal_data()
+                                st.session_state.start_time = time.time()
+                                st.session_state.session_running = True
+                                st.session_state.current_trial_context = {'trial_number': 0, 'trial_type': None}
+                                st.session_state.lick_count = 0
+                                st.session_state.last_lick_time = 0
+                                st.session_state.arduino_status = ""
                                 st.rerun()
+                            else:
+                                st.error("Failed to send START command.")
+                        else:
+                            st.error("Failed to send SEQUENCE command.")
+                    else:
+                        st.error(f"Failed to reset Arduino to IDLE. Current status: {st.session_state.arduino_status}")
             else:
+                # Stop/Abort button
                 if st.button("Abort Session", type="primary"):
                     st.session_state.arduino.send_command("ABORT")
                     st.session_state.session_running = False

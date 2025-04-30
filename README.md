@@ -56,10 +56,11 @@ cd ohrbets-gui
 pip install -r OHRBETS_GUI_v2/python/requirements.txt
 ```
 
-3. Upload Arduino sketch:
+3. Upload the Arduino firmware:
    - Open `OHRBETS_GUI_v2/arduino/fsm_pavlovian_odor/fsm_pavlovian_odor.ino` in the Arduino IDE
-   - Connect your Arduino board
-   - Upload the sketch
+   - Select your Arduino board and port
+   - Click Upload
+   - **Note**: The latest firmware includes a fix for the reward solenoid manual control. Make sure to upload the latest version to enable proper manual control of the reward solenoid.
 
 ## Usage
 

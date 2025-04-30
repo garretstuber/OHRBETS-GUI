@@ -66,18 +66,21 @@ private:
     // State machine states
     enum State {
         IDLE,
-        ITI,               // 1. ITI period
-        TRIAL_INIT,       // 2. Trial start + 5s wait
-        ODOR_PERIOD,      // 3. 2s odor presentation
-        TRACE_INTERVAL,   // 4. 1s trace interval
-        REWARD_SEQUENCE,  // 5. Reward solenoid pattern
-        CONSUMATORY,      // 6. 5s consumatory period
-        TRIAL_OFF,        // 7. End trial and loop back
-        COMPLETE,         // Session complete
-        // Test states
+        ITI,
+        TRIAL_INIT,
+        ODOR_PERIOD,
+        TRACE_INTERVAL,
+        // Restore reward states for non-blocking trial sequence
+        REWARD_PULSE1,
+        REWARD_DELAY,
+        REWARD_PULSE2,
+        CONSUMATORY,
+        TRIAL_OFF,
+        COMPLETE,
+        // Test states (still use direct blocking delays)
         TEST_ODOR,
         TEST_REWARD,
-        LICK_TEST,        // Added state for lick testing
+        LICK_TEST,
         // Manual control states
         MANUAL_ODOR_CONTROL,
         MANUAL_REWARD_CONTROL
@@ -250,8 +253,8 @@ private:
     void directOdorTest() {
         Serial.println("DIRECT_ODOR_TEST_START");
         
-        // Set state to TEST_ODOR
-        setState(TEST_ODOR);
+        // Set state to TEST_ODOR // Removed state change
+        // setState(TEST_ODOR);
         
         // Turn on odor solenoid
         digitalWrite(LED_PIN, HIGH);  // LED indicator
@@ -264,8 +267,8 @@ private:
         setOdor(false);
         digitalWrite(LED_PIN, LOW);
         
-        // Return to idle state
-        setState(IDLE);
+        // Return to idle state // Removed state change
+        // setState(IDLE);
         Serial.println("DIRECT_ODOR_TEST_COMPLETE");
     }
     
@@ -273,8 +276,8 @@ private:
     void directRewardTest() {
         Serial.println("DIRECT_REWARD_TEST_START");
         
-        // Set state to TEST_REWARD
-        setState(TEST_REWARD);
+        // Set state to TEST_REWARD // Removed state change
+        // setState(TEST_REWARD);
         
         // First pulse (40ms)
         digitalWrite(LED_PIN, HIGH);
@@ -299,35 +302,9 @@ private:
         digitalWrite(LED_PIN, LOW);
         Serial.println("REWARD_PULSE2_OFF");
         
-        // Return to idle state
-        setState(IDLE);
+        // Return to idle state // Removed state change
+        // setState(IDLE);
         Serial.println("DIRECT_REWARD_TEST_COMPLETE");
-    }
-    
-    // Direct reward sequence for CS+ trials with precise timing
-    void deliverReward() {
-        Serial.println("REWARD_DELIVERY_START");
-        
-        // First pulse (40ms)
-        setReward(true);
-        Serial.println("REWARD_PULSE1_ON");
-        delay(REWARD_PULSE1_DURATION);
-        
-        // Inter-pulse delay (140ms)
-        setReward(false);
-        Serial.println("REWARD_PULSE1_OFF");
-        delay(REWARD_DELAY_DURATION);
-        
-        // Second pulse (40ms)
-        setReward(true);
-        Serial.println("REWARD_PULSE2_ON");
-        delay(REWARD_PULSE2_DURATION);
-        
-        // Turn off
-        setReward(false);
-        Serial.println("REWARD_PULSE2_OFF");
-        
-        Serial.println("REWARD_DELIVERY_COMPLETE");
     }
 
     void initializeHardware() {
@@ -402,12 +379,11 @@ public:
         }
         
         // Only proceed if in active state and time has elapsed
-        if (state != IDLE && state != COMPLETE && currentTime >= nextStateTime) {
+        if (state != IDLE && state != COMPLETE && !inManualControl && currentTime >= nextStateTime) {
             switch (state) {
                 case ITI:
                     // ITI complete, start new trial sequence
                     setState(TRIAL_INIT);
-                    // Log trial start with current trial type
                     logEvent(EVENT_TRIAL_START);
                     nextStateTime = currentTime + TRIAL_INIT_DURATION;
                     break;
@@ -427,41 +403,48 @@ public:
                     break;
 
                 case TRACE_INTERVAL:
-                    Serial.print("DEBUG:Transitioning from TRACE_INTERVAL to REWARD_SEQUENCE, Trial=");
-                    Serial.print(currentTrial);
-                    Serial.print(", Type=");
-                    Serial.println(currentTrialType);
-                    
-                    setState(REWARD_SEQUENCE);
                     if (currentTrialType == 1) {  // CS+
-                        deliverReward();  // This handles the precise reward pattern timing
+                        // Start the non-blocking reward pulse sequence
+                        setState(REWARD_PULSE1);
+                        setReward(true);
+                        nextStateTime = currentTime + REWARD_PULSE1_DURATION;
+                    } else { // CS-
+                        // Skip reward sequence, go directly to consumatory period
+                        setState(CONSUMATORY);
+                        nextStateTime = currentTime + CONSUMATORY_DURATION; 
                     }
-                    nextStateTime = currentTime + rewardDuration;
                     break;
 
-                case REWARD_SEQUENCE:
-                    Serial.print("DEBUG:Transitioning from REWARD_SEQUENCE to CONSUMATORY, Trial=");
-                    Serial.print(currentTrial);
-                    Serial.print(", Type=");
-                    Serial.println(currentTrialType);
-                    
+                // Non-blocking reward sequence states
+                case REWARD_PULSE1:
+                    setReward(false);
+                    setState(REWARD_DELAY);
+                    nextStateTime = currentTime + REWARD_DELAY_DURATION;
+                    break;
+                
+                case REWARD_DELAY:
+                    setReward(true);
+                    setState(REWARD_PULSE2);
+                    nextStateTime = currentTime + REWARD_PULSE2_DURATION;
+                    break;
+                
+                case REWARD_PULSE2:
+                    setReward(false);
+                    // Reward sequence finished, move to consumatory period
                     setState(CONSUMATORY);
                     nextStateTime = currentTime + CONSUMATORY_DURATION;
                     break;
 
                 case CONSUMATORY:
-                    Serial.print("DEBUG:Transitioning from CONSUMATORY to TRIAL_OFF, Trial=");
-                    Serial.print(currentTrial);
-                    Serial.print(", Type=");
-                    Serial.println(currentTrialType);
-                    
+                    // Consumatory period finished, end the trial
                     setState(TRIAL_OFF);
                     logEvent(EVENT_TRIAL_END);
-                    
-                    // Prepare for next trial
+                    nextStateTime = currentTime; // Immediately check for next state (ITI or COMPLETE)
+                    break;
+
+                case TRIAL_OFF:
+                    // Prepare for next trial or end session
                     currentTrial++;
-                    
-                    // Check if we've completed all trials
                     if (currentTrial >= numTrials) {
                         Serial.println("DEBUG:All trials completed, transitioning to COMPLETE");
                         setState(COMPLETE);
@@ -477,7 +460,7 @@ public:
                         
                         currentTrialType = trialSequence[currentTrial];
                         Serial.print("DEBUG:Starting next trial, Trial=");
-                        Serial.print(currentTrial);
+                        Serial.print(currentTrial + 1); // Display 1-based trial number
                         Serial.print(", Type=");
                         Serial.println(currentTrialType);
                         
@@ -497,23 +480,38 @@ public:
                     break;
             }
         }
+        
+        // Check for lick events (non-blocking)
+        checkLicks(); 
+        
+        // Safety checks (non-blocking)
+        // ... (existing safety checks remain the same, check rewardActive against REWARD_PULSE1/2, not REWARD_SEQUENCE)
+        if (rewardActive && !inManualControl && 
+            state != REWARD_PULSE1 && state != REWARD_PULSE2) { 
+            setReward(false);
+            Serial.println("SAFETY:REWARD_OFF");
+        }
+        
+        if (odorActive && !inManualControl && 
+            state != ODOR_PERIOD && state != TEST_ODOR) {
+            setOdor(false);
+            Serial.println("SAFETY:ODOR_OFF");
+        }
     }
     
     void processCommand(const String& command) {
         // Handle commands from Python GUI
         if (command == "RESET") {
-            // Force reset the state machine to IDLE
             emergencyStop();
             return;
         }
-        
         else if (command == "FORCE_IDLE") {
-            // Force state machine to IDLE regardless of current state
             setState(IDLE);
             Serial.println("FORCED_TO_IDLE");
             return;
         }
         
+        // --- Timing and Sequence Commands --- 
         if (command.startsWith("SET_TIMING:")) {
             // Format: SET_TIMING:iti,odor,reward
             // Example: SET_TIMING:5000,2000,500
@@ -589,39 +587,18 @@ public:
             Serial.print(csMinus);
             Serial.println(" CS-)");
         }
-        else if (command == "TEST_LICK") {
-            // Only allow test if in IDLE state
-            if (state == IDLE) {
-                setState(LICK_TEST);
-                Serial.println("LICK_TEST:MONITORING");
-            } else {
-                Serial.println("ERROR:BUSY");
-            }
-        }
-        else if (command == "STOP_LICK_TEST") {
-            // Return to IDLE state from lick test
-            if (state == LICK_TEST) {
-                setState(IDLE);
-                Serial.println("LICK_TEST:STOPPED");
-            }
-        }
+        
+        // --- Session Control Commands --- 
         else if (command == "START") {
-            // Only start if in IDLE state and not running tests
             if (state == IDLE && numTrials > 0) {
-                // Reset timestamp reference when starting new session
                 timestampReference = millis();
-                
-                // Start session - send session start event first
                 Serial.println("SESSION_STARTED");
                 logEvent(EVENT_SESSION_START);
-                
-                // Initialize session
                 currentTrial = 0;
                 currentTrialType = trialSequence[0];
                 setState(ITI);
                 nextStateTime = millis() + intertrialInterval;
             } else {
-                // Provide detailed error information
                 Serial.print("ERROR:BUSY (State=");
                 Serial.print(state);
                 Serial.print(", Trials=");
@@ -630,9 +607,80 @@ public:
             }
         }
         else if (command == "ABORT") {
-            // Emergency stop
             emergencyStop();
         }
+        
+        // --- Hardware Test Commands --- 
+        else if (command == "TEST_ODOR") {
+            if (state == IDLE) {
+                directOdorTest();
+            } else {
+                Serial.println("ERROR:BUSY");
+            }
+        }
+        else if (command == "TEST_REWARD") {
+            if (state == IDLE) {
+                directRewardTest();
+            } else {
+                Serial.println("ERROR:BUSY");
+            }
+        }
+        
+        // --- Manual Control Commands --- 
+        else if (command == "MANUAL_REWARD_ON") {
+            if (state == IDLE) {
+                inManualControl = true; // Set flag BEFORE changing state
+                setState(MANUAL_REWARD_CONTROL);
+                setReward(true);
+                Serial.println("MANUAL_REWARD:ON");
+            } else {
+                Serial.println("ERROR:BUSY (Cannot manually control while busy)");
+            }
+        }
+        else if (command == "MANUAL_REWARD_OFF") {
+            setReward(false);
+            Serial.println("MANUAL_REWARD:OFF");
+            // Always return to IDLE after manual off
+            setState(IDLE);
+        }
+        else if (command == "MANUAL_ODOR_ON") {
+            if (state == IDLE) {
+                inManualControl = true; // Set flag BEFORE changing state
+                setState(MANUAL_ODOR_CONTROL);
+                setOdor(true);
+                Serial.println("MANUAL_ODOR:ON");
+            } else {
+                Serial.println("ERROR:BUSY (Cannot manually control while busy)");
+            }
+        }
+        else if (command == "MANUAL_ODOR_OFF") {
+            setOdor(false);
+            Serial.println("MANUAL_ODOR:OFF");
+            // Always return to IDLE after manual off
+            setState(IDLE);
+        }
+        
+        // --- Lick Test Commands --- 
+        else if (command == "TEST_LICK") {
+            if (state == IDLE) {
+                setState(LICK_TEST);
+                Serial.println("LICK_TEST:MONITORING");
+            } else {
+                Serial.println("ERROR:BUSY");
+            }
+        }
+        else if (command == "STOP_LICK_TEST") {
+            if (state == LICK_TEST) {
+                setState(IDLE);
+                Serial.println("LICK_TEST:STOPPED");
+            }
+        }
+        else if (command == "RESET_LICK_COUNT") {
+            lickCount = 0;
+            Serial.println("LICK_COUNT_RESET");
+        }
+        
+        // --- Status and Debug Commands --- 
         else if (command == "STATUS") {
             // Report current status
             Serial.print("STATUS:");
@@ -649,69 +697,6 @@ public:
             Serial.print(lickCount);
             Serial.print(",LastLick:");
             Serial.println(lastLickTime);
-        }
-        else if (command == "TEST_ODOR") {
-            // Only allow test if in IDLE state
-            if (state == IDLE) {
-                // Use direct timing method instead of state machine
-                directOdorTest();
-            } else {
-                Serial.println("ERROR:BUSY");
-            }
-        }
-        else if (command == "TEST_REWARD") {
-            // Only allow test if in IDLE state
-            if (state == IDLE) {
-                // Use direct timing method instead of state machine
-                directRewardTest();
-            } else {
-                Serial.println("ERROR:BUSY");
-            }
-        }
-        else if (command == "MANUAL_REWARD_ON") {
-            // Directly control reward for manual testing
-            if (state == IDLE || inManualControl) {
-                setState(MANUAL_REWARD_CONTROL);
-                setReward(true);
-                Serial.println("MANUAL_REWARD:ON");
-            } else {
-                Serial.println("ERROR:BUSY");
-            }
-        }
-        else if (command == "MANUAL_REWARD_OFF") {
-            // Directly control reward for manual testing
-            setReward(false);
-            Serial.println("MANUAL_REWARD:OFF");
-            
-            // Return to IDLE if in manual control
-            if (inManualControl) {
-                setState(IDLE);
-            }
-        }
-        else if (command == "MANUAL_ODOR_ON") {
-            // Directly control odor for manual testing
-            if (state == IDLE || inManualControl) {
-                setState(MANUAL_ODOR_CONTROL);
-                setOdor(true);
-                Serial.println("MANUAL_ODOR:ON");
-            } else {
-                Serial.println("ERROR:BUSY");
-            }
-        }
-        else if (command == "MANUAL_ODOR_OFF") {
-            // Directly control odor for manual testing
-            setOdor(false);
-            Serial.println("MANUAL_ODOR:OFF");
-            
-            // Return to IDLE if in manual control
-            if (inManualControl) {
-                setState(IDLE);
-            }
-        }
-        else if (command == "RESET_LICK_COUNT") {
-            // Reset lick counter
-            lickCount = 0;
-            Serial.println("LICK_COUNT_RESET");
         }
         else if (command == "DEBUG_STATE") {
             // Output debug information about current state
